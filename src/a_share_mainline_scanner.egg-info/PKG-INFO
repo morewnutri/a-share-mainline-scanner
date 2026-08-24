@@ -1,0 +1,78 @@
+Metadata-Version: 2.4
+Name: a-share-mainline-scanner
+Version: 1.0.0
+Summary: A股行业与概念板块主线/潜在主线扫描器
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: akshare>=1.18.38
+Requires-Dist: pandas>=2.0
+Requires-Dist: numpy>=1.24
+Requires-Dist: matplotlib>=3.7
+Requires-Dist: seaborn>=0.13
+Requires-Dist: openpyxl>=3.1
+Requires-Dist: tenacity>=8.2
+Requires-Dist: tqdm>=4.66
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0; extra == "dev"
+
+# A股行业/概念板块主线扫描器
+
+该程序从东方财富（经 AKShare）导入完整的行业与概念板块列表、近约 50 个交易日的板块日线，以及行业/概念今日、5 日、10 日主力资金排名。它计算涨跌幅、趋势一阶导、加速度、趋势稳定性、相对强弱、量能/换手扩张、市场广度、主力资金、突破位置与拥挤度，输出当前主线和可能启动的下一主线。
+
+## 安装与运行
+
+在项目目录中执行：
+
+```powershell
+python -m pip install -e .
+mainline-scanner
+```
+
+也可以不用命令入口：
+
+```powershell
+python -m mainline_scanner.cli --board-types industry concept --workers 8
+```
+
+首次全量扫描约 500 个板块，耗时取决于东方财富接口和网络。后续运行会复用 `data/cache` 中 8 小时内的缓存。
+
+常用参数：
+
+```powershell
+# 只扫描行业，速度最快
+mainline-scanner --board-types industry
+
+# 强制更新数据
+mainline-scanner --refresh
+
+# 接口限流/不稳定时降低并发
+mainline-scanner --workers 4
+
+# 调试：每类只抓前 10 个
+mainline-scanner --limit 10
+```
+
+默认输出到 `reports/latest/`：
+
+- `板块完整评分.csv`：适合二次分析的完整数据；
+- `板块主线扫描.xlsx`：完整评分、当前主线、潜在主线、失败记录四个工作表；
+- `主线雷达.png`：趋势速度/加速度、主线榜、潜在榜、多周期热力图；
+- `领先板块走势.png`：前十板块近 30 个交易日归一化走势；
+- `主线判断报告.md/.html`：可直接阅读的判断报告。
+
+## 指标解释
+
+- `slope_3d/5d/10d`：对收盘指数取对数后做线性回归，表示每日趋势涨速（%/交易日），比简单首尾涨幅更抗单日噪声。
+- `acceleration`：当前 3 日斜率减去三日前的 5 日斜率，捕捉刚开始提速的板块。
+- `trend_r2_*`：趋势回归拟合优度，区分稳定推进和脉冲式异动。
+- `rs_5d/10d`：相对同类板块中位数的超额涨幅。
+- `amount_ratio_5_20`、`turnover_ratio_5_20`：近期量能/换手相对 20 日均值的扩张。
+- `breadth`：实时上涨家数 /（上涨家数 + 下跌家数），避免只靠少数权重股拉指数。
+- `flow_*d_pct`：主力净流入占比；金额不直接跨板块比较，以降低板块规模偏差。
+- `distance_ma20`、`distance_high20`：均线偏离与突破位置；对末端暴涨和过度偏离扣拥挤分。
+
+`主线分`重视趋势持续、相对强弱、资金和广度；`启动分`更重视短期斜率加速、资金改善和量价扩张，并惩罚已经过热的板块。评分是同类板块内的横截面百分位，适合每天收盘后固定运行、观察排名变化。
+
+## 使用边界
+
+免费网页接口可能变更或限流；程序有重试、缓存和单板块失败降级，失败项会写入 Excel。概念板块高度重叠，扫描结果应作为“发现与排序”工具，再结合政策/事件驱动、指数环境和个股确认，不构成投资建议。

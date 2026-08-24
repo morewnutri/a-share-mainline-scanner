@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "a-share-mainline-scanner"
+version = "1.0.0"
+description = "A股行业与概念板块主线/潜在主线扫描器"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "akshare>=1.18.38",
+  "pandas>=2.0",
+  "numpy>=1.24",
+  "matplotlib>=3.7",
+  "seaborn>=0.13",
+  "openpyxl>=3.1",
+  "tenacity>=8.2",
+  "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+mainline-scanner = "mainline_scanner.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+

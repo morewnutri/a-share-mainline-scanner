@@ -1,0 +1,2 @@
+[console_scripts]
+mainline-scanner = mainline_scanner.cli:main

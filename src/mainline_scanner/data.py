@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import json
 import logging
-import math
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -53,6 +54,9 @@ class EastmoneyAkshareProvider:
         except ImportError as exc:
             raise RuntimeError("缺少 akshare，请先执行 pip install -e .") from exc
         self.ak = ak
+        self._eastmoney_history_available: bool | None = None
+        self._fallback_lock = threading.Lock()
+        self._ths_maps: dict[str, dict[str, str]] = {}
 
     def _fresh(self, path: Path) -> bool:
         if self.refresh or not path.exists():
@@ -126,10 +130,96 @@ class EastmoneyAkshareProvider:
                     continue
                 lines = data.get("klines") or []
                 columns = ["日期", "开盘", "收盘", "最高", "最低", "成交量", "成交额", "振幅", "涨跌幅", "涨跌额", "换手率"]
-                return pd.DataFrame([line.split(",") for line in lines], columns=columns)
+                result = pd.DataFrame([line.split(",") for line in lines], columns=columns)
+                result["数据源"] = "东方财富"
+                return result
             except Exception as exc:
                 last_error = exc
         raise RuntimeError(f"板块 {code} 日线域名均不可用: {last_error}")
+
+    @staticmethod
+    def _normalize_board_name(name: str) -> str:
+        text = str(name).strip().lower()
+        text = re.sub(r"[\s_（）()\-—·]", "", text)
+        text = re.sub(r"(概念|板块)$", "", text)
+        text = re.sub(r"[ⅠⅡⅢⅣⅤⅰⅱⅲⅳⅴ]+$", "", text)
+        return text
+
+    def _load_ths_map(self, kind: str) -> dict[str, str]:
+        """只加载一次同花顺名称-代码映射，供东方财富日线失败时使用。"""
+        if kind in self._ths_maps:
+            return self._ths_maps[kind]
+        with self._fallback_lock:
+            if kind in self._ths_maps:
+                return self._ths_maps[kind]
+            from bs4 import BeautifulSoup
+
+            headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://q.10jqka.com.cn/"}
+            url = "https://q.10jqka.com.cn/thshy/" if kind == "industry" else "https://q.10jqka.com.cn/gn/detail/code/307822/"
+            response = requests.get(url, headers=headers, timeout=20)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, features="lxml")
+            container = soup.find("div", attrs={"class": "cate_inner"})
+            mapping: dict[str, str] = {}
+            if container is not None:
+                for item in container.find_all("a"):
+                    href = item.get("href", "")
+                    match = re.search(r"/code/(\d+)/", href)
+                    if match and item.get_text(strip=True):
+                        mapping[item.get_text(strip=True)] = match.group(1)
+            if kind == "concept":
+                try:
+                    extra = self.ak.stock_board_concept_name_ths()
+                    if {"name", "code"}.issubset(extra.columns):
+                        mapping.update(dict(zip(extra["name"].astype(str), extra["code"].astype(str))))
+                except Exception as exc:
+                    LOG.warning("同花顺新增概念目录补充失败，使用静态目录: %s", exc)
+            normalized = {self._normalize_board_name(name): code for name, code in mapping.items()}
+            self._ths_maps[kind] = normalized
+            LOG.info("同花顺备用目录已加载: %s %d 个", kind, len(normalized))
+            return normalized
+
+    def _ths_history(self, kind: str, name: str, start: str, end: str) -> pd.DataFrame:
+        """同花顺板块指数日线备用源。"""
+        from bs4 import BeautifulSoup
+
+        mapping = self._load_ths_map(kind)
+        normalized_name = self._normalize_board_name(name)
+        if normalized_name not in mapping:
+            raise LookupError(f"同花顺无同名板块: {name}")
+        outer_code = mapping[normalized_name]
+        headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://q.10jqka.com.cn/"}
+        inner_code = outer_code
+        if kind == "concept":
+            detail_url = f"https://q.10jqka.com.cn/gn/detail/code/{outer_code}/"
+            detail = requests.get(detail_url, headers=headers, timeout=20)
+            detail.raise_for_status()
+            node = BeautifulSoup(detail.text, features="lxml").find("input", attrs={"id": "clid"})
+            if node is not None and node.get("value"):
+                inner_code = str(node["value"])
+
+        rows: list[list[str]] = []
+        for year in range(int(start[:4]), int(end[:4]) + 1):
+            url = f"https://d.10jqka.com.cn/v4/line/bk_{inner_code}/01/{year}.js"
+            response = requests.get(url, headers=headers, timeout=20)
+            response.raise_for_status()
+            text = response.text
+            left, right = text.find("{"), text.rfind("}")
+            if left < 0 or right <= left:
+                continue
+            payload = json.loads(text[left : right + 1])
+            for line in str(payload.get("data", "")).split(";"):
+                values = line.split(",")
+                if len(values) >= 7:
+                    rows.append(values[:7])
+        if not rows:
+            raise RuntimeError(f"同花顺未返回日线: {name}")
+        result = pd.DataFrame(rows, columns=["日期", "开盘", "最高", "最低", "收盘", "成交量", "成交额"])
+        dates = pd.to_datetime(result["日期"], format="%Y%m%d", errors="coerce")
+        begin, finish = pd.to_datetime(start), pd.to_datetime(end)
+        result = result.loc[dates.between(begin, finish)].copy()
+        result["数据源"] = "同花顺"
+        return result.reset_index(drop=True)
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=0.8, min=1, max=6), reraise=True)
     def _call(self, func, **kwargs) -> pd.DataFrame:
@@ -180,7 +270,20 @@ class EastmoneyAkshareProvider:
         if self._fresh(path):
             raw = self._read_cache(path)
         else:
-            raw = self._direct_history(code, start, end)
+            eastmoney_error: Exception | None = None
+            raw = pd.DataFrame()
+            if self._eastmoney_history_available is not False:
+                try:
+                    raw = self._direct_history(code, start, end)
+                except Exception as exc:
+                    eastmoney_error = exc
+            if raw.empty:
+                try:
+                    raw = self._ths_history(kind, name, start, end)
+                except Exception as ths_error:
+                    raise RuntimeError(
+                        f"东方财富失败: {eastmoney_error or '端点探测已判定不可用'}; 同花顺失败: {ths_error}"
+                    ) from ths_error
             self._write_cache(raw, path)
         if raw.empty:
             return raw
@@ -190,6 +293,7 @@ class EastmoneyAkshareProvider:
             "close": ("收盘", "收盘价", "close"), "high": ("最高", "最高价", "high"),
             "low": ("最低", "最低价", "low"), "pct_change": ("涨跌幅",),
             "volume": ("成交量",), "amount": ("成交额",), "turnover": ("换手率",),
+            "data_source": ("数据源", "data_source"),
         }
         for target, candidates in aliases.items():
             col = _find_col(raw.columns, *candidates)
@@ -208,6 +312,25 @@ class EastmoneyAkshareProvider:
         histories: dict[tuple[str, str], pd.DataFrame] = {}
         failures: list[dict[str, str]] = []
         rows = boards[["kind", "code", "name"]].to_dict("records")
+        uncached = [
+            r for r in rows
+            if not self._fresh(self._history_path(str(r["kind"]), str(r["code"]), str(r["name"])))
+        ]
+        if uncached and self._eastmoney_history_available is None:
+            probe = uncached[0]
+            try:
+                raw = self._direct_history(str(probe["code"]), start, end)
+                self._eastmoney_history_available = True
+                self._write_cache(raw, self._history_path(str(probe["kind"]), str(probe["code"]), str(probe["name"])))
+                LOG.info("东方财富板块日线端点可用")
+            except Exception as exc:
+                self._eastmoney_history_available = False
+                LOG.warning("东方财富板块日线整体不可用，切换同花顺备用源: %s", exc)
+                for kind in boards["kind"].astype(str).unique():
+                    try:
+                        self._load_ths_map(kind)
+                    except Exception as map_error:
+                        LOG.warning("同花顺 %s 备用目录加载失败: %s", kind, map_error)
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = {
                 pool.submit(self.get_history, str(r["kind"]), str(r["code"]), str(r["name"]), start, end): r

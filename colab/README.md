@@ -9,7 +9,7 @@
 %run colab/run_scan.py
 ```
 
-脚本默认扫描行业和概念源全集、不应用概念过滤规则，并把缓存与报告保存到 Google Drive。若遇到东方财富限流，把 `run_scan.py` 顶部的 `WORKERS` 改为 `1` 后重跑；成功缓存不会重复下载。
+脚本默认扫描行业和概念源全集、不应用概念过滤规则。缓存保存在 Google Drive，表格和两张图片直接显示在 Colab 输出区域，不创建下载任务。若东方财富板块日线域名整体失败，程序会自动切换同花顺板块指数日线；若仍遇到限流，把 `run_scan.py` 顶部的 `WORKERS` 改为 `1` 后重跑。
 
 查看遗漏板块：
 
@@ -26,4 +26,3 @@ display(missing[["kind", "code", "name", "audit_status", "fetch_error"]])
 path = "/content/drive/MyDrive/a-share-mainline-scanner/reports/latest/数据完整性审计.xlsx"
 display(pd.read_excel(path, sheet_name="汇总"))
 ```
-

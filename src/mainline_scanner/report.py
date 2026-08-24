@@ -14,7 +14,10 @@ KIND_CN = {"industry": "行业", "concept": "概念"}
 
 
 def configure_chinese_font() -> None:
-    plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "Arial Unicode MS", "DejaVu Sans"]
+    plt.rcParams["font.sans-serif"] = [
+        "Noto Sans CJK SC", "Noto Sans CJK JP", "WenQuanYi Micro Hei",
+        "Microsoft YaHei", "SimHei", "Arial Unicode MS", "DejaVu Sans",
+    ]
     plt.rcParams["axes.unicode_minus"] = False
     sns.set_theme(style="whitegrid", rc={"font.sans-serif": plt.rcParams["font.sans-serif"]})
 

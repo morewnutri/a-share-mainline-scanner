@@ -64,7 +64,7 @@ mainline-scanner --limit 10
 %run colab/run_scan.py
 ```
 
-详细说明见 `colab/README.md`。脚本默认关闭概念过滤、扫描源全集，并使用 Google Drive 保存缓存和报告。
+详细说明见 `colab/README.md`。脚本默认关闭概念过滤、扫描源全集，使用 Google Drive 保存缓存，并在 Colab 中直接显示排行榜、完整性表格和图片，不自动下载 ZIP。东方财富板块日线整体不可用时会切换到同花顺同名板块指数日线。
 
 ## 指标解释
 

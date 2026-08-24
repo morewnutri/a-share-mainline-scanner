@@ -66,6 +66,7 @@ def build_completeness_audit(
             "source_duplicate_name": bool(row.source_duplicate_name),
             "intentional_filter": intentional_filter,
             "fetch_error": error,
+            "history_source": "",
             "history_rows": 0, "history_start": pd.NaT, "history_end": pd.NaT,
             "stale_trading_days": np.nan, "missing_trading_days_count": 0,
             "missing_trading_dates": "", "duplicate_dates": 0,
@@ -79,6 +80,8 @@ def build_completeness_audit(
             h = history.copy()
             dates = pd.to_datetime(h["date"], errors="coerce").dropna().sort_values()
             record["history_rows"] = len(h)
+            if "data_source" in h and h["data_source"].notna().any():
+                record["history_source"] = str(h["data_source"].dropna().iloc[-1])
             record["history_start"] = dates.min() if not dates.empty else pd.NaT
             record["history_end"] = dates.max() if not dates.empty else pd.NaT
             record["duplicate_dates"] = int(dates.duplicated().sum())

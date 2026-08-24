@@ -37,6 +37,15 @@ def _find_col(columns: Iterable[str], *needles: str) -> str | None:
     return None
 
 
+def _parse_market_dates(values: pd.Series) -> pd.Series:
+    """解析行情日期，避免把整数 YYYYMMDD 当成 1970 起算的纳秒。"""
+    text = values.astype("string").str.strip().str.replace(r"\.0$", "", regex=True)
+    compact = text.str.fullmatch(r"\d{8}", na=False)
+    parsed = pd.to_datetime(text.where(~compact), errors="coerce")
+    parsed.loc[compact] = pd.to_datetime(text.loc[compact], format="%Y%m%d", errors="coerce")
+    return parsed
+
+
 @dataclass
 class FetchResult:
     histories: dict[tuple[str, str], pd.DataFrame]
@@ -389,7 +398,7 @@ class EastmoneyAkshareProvider:
         out = raw.rename(columns=rename).copy()
         if not {"date", "close"}.issubset(out.columns):
             raise ValueError(f"{kind}/{name} 历史字段异常: {list(raw.columns)}")
-        out["date"] = pd.to_datetime(out["date"], errors="coerce")
+        out["date"] = _parse_market_dates(out["date"])
         for col in ["open", "close", "high", "low", "pct_change", "volume", "amount", "turnover"]:
             if col in out:
                 out[col] = pd.to_numeric(out[col], errors="coerce")

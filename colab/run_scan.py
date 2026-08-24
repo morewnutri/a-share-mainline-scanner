@@ -81,10 +81,14 @@ def main() -> None:
     ]
     columns = [col for col in columns if col in scored]
     display(Markdown("## 当前主线 Top 30"))
-    main_rank = display_scored.sort_values("mainline_score", ascending=False).drop_duplicates(["kind", "_display_group"])
+    main_rank = display_scored[
+        display_scored["status"].astype(str).str.startswith("主线")
+    ].sort_values("mainline_score", ascending=False).drop_duplicates(["kind", "_display_group"])
     display(main_rank[columns].head(30))
     display(Markdown("## 潜在启动 Top 30"))
-    candidate_rank = display_scored.sort_values("candidate_score", ascending=False).drop_duplicates(["kind", "_display_group"])
+    candidate_rank = display_scored[
+        display_scored["status"].isin(["潜在启动", "值得关注"])
+    ].sort_values("candidate_score", ascending=False).drop_duplicates(["kind", "_display_group"])
     display(candidate_rank[columns].head(30))
 
     audit_file = output_dir / "数据完整性审计.xlsx"

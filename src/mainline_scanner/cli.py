@@ -66,9 +66,11 @@ def run(args: argparse.Namespace) -> dict[str, Path]:
     print(audit_summary.to_string(index=False))
     show_cols = ["kind", "name", "status", "mainline_score", "candidate_score", "ret_5d", "ret_10d", "slope_5d", "acceleration"]
     print("\n=== 当前主线 Top 20 ===")
-    print(scored[show_cols].head(20).to_string(index=False, float_format=lambda x: f"{x:7.2f}"))
+    current_mainline = scored[scored["status"].astype(str).str.startswith("主线")]
+    print(current_mainline[show_cols].head(20).to_string(index=False, float_format=lambda x: f"{x:7.2f}"))
     print("\n=== 潜在主线 Top 20 ===")
-    print(scored.sort_values("candidate_score", ascending=False)[show_cols].head(20).to_string(index=False, float_format=lambda x: f"{x:7.2f}"))
+    potential = scored[scored["status"].isin(["潜在启动", "值得关注"])]
+    print(potential.sort_values("candidate_score", ascending=False)[show_cols].head(20).to_string(index=False, float_format=lambda x: f"{x:7.2f}"))
     print(f"\n报告已写入: {args.output_dir.resolve()}")
     return paths
 

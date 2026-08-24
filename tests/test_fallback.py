@@ -2,7 +2,7 @@ from datetime import timedelta
 
 import pandas as pd
 
-from mainline_scanner.data import EastmoneyAkshareProvider
+from mainline_scanner.data import EastmoneyAkshareProvider, _parse_market_dates
 
 
 def test_history_falls_back_to_ths_when_eastmoney_fails(tmp_path):
@@ -29,6 +29,13 @@ def test_board_name_normalization_matches_cross_source_names():
     normalize = EastmoneyAkshareProvider._normalize_board_name
     assert normalize("AI 芯片概念") == normalize("AI芯片")
     assert normalize("焦炭Ⅲ") == normalize("焦炭")
+
+
+def test_numeric_yyyymmdd_cache_dates_do_not_become_1970():
+    parsed = _parse_market_dates(pd.Series([20260821, "20260822", "2026-08-23", "20260824.0"]))
+    assert parsed.dt.strftime("%Y-%m-%d").tolist() == [
+        "2026-08-21", "2026-08-22", "2026-08-23", "2026-08-24",
+    ]
 
 
 def test_industry_history_falls_back_to_sw_after_ths_fails(tmp_path):

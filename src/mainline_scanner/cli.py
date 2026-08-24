@@ -9,6 +9,7 @@ from pathlib import Path
 import pandas as pd
 
 from .analysis import build_metric_table, score_boards
+from .audit import build_completeness_audit
 from .data import EastmoneyAkshareProvider
 from .report import write_outputs
 
@@ -33,15 +34,18 @@ def parser() -> argparse.ArgumentParser:
 def run(args: argparse.Namespace) -> dict[str, Path]:
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     provider = EastmoneyAkshareProvider(args.cache_dir, refresh=args.refresh, ttl_hours=args.cache_hours)
+    source_universes = []
     universes = []
     for kind in args.board_types:
         u = provider.get_universe(kind)
+        source_universes.append(u.copy())
         if args.exclude_regex and kind == "concept":
             u = u[~u["name"].astype(str).str.contains(args.exclude_regex, regex=True, na=False)]
         if args.limit:
             u = u.head(args.limit)
         universes.append(u)
     boards = pd.concat(universes, ignore_index=True)
+    source_boards = pd.concat(source_universes, ignore_index=True)
     end = date.today()
     start = end - timedelta(days=args.lookback_calendar_days)
     logging.info("扫描 %d 个板块，日期 %s 至 %s", len(boards), start, end)
@@ -52,7 +56,14 @@ def run(args: argparse.Namespace) -> dict[str, Path]:
     if scored.empty:
         raise RuntimeError("没有获得足够的有效板块数据，请检查网络、日期或 AKShare 接口状态")
     failures = pd.DataFrame(fetched.failures)
-    paths = write_outputs(scored, fetched.histories, failures, args.output_dir)
+    audit, audit_summary = build_completeness_audit(
+        source_boards, boards, fetched.histories, fetched.failures, flows, scored,
+    )
+    paths = write_outputs(
+        scored, fetched.histories, failures, args.output_dir, audit, audit_summary,
+    )
+    print("\n=== 数据完整性 ===")
+    print(audit_summary.to_string(index=False))
     show_cols = ["kind", "name", "status", "mainline_score", "candidate_score", "ret_5d", "ret_10d", "slope_5d", "acceleration"]
     print("\n=== 当前主线 Top 20 ===")
     print(scored[show_cols].head(20).to_string(index=False, float_format=lambda x: f"{x:7.2f}"))

@@ -88,6 +88,8 @@ def write_outputs(
     histories: dict[tuple[str, str], pd.DataFrame],
     failures: pd.DataFrame,
     output_dir: Path,
+    audit: pd.DataFrame | None = None,
+    audit_summary: pd.DataFrame | None = None,
 ) -> dict[str, Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     full_csv = output_dir / "板块完整评分.csv"
@@ -96,25 +98,53 @@ def write_outputs(
     trends = output_dir / "领先板块走势.png"
     md = output_dir / "主线判断报告.md"
     html_path = output_dir / "主线判断报告.html"
+    audit_xlsx = output_dir / "数据完整性审计.xlsx"
+    omitted_csv = output_dir / "遗漏板块明细.csv"
     scored.to_csv(full_csv, index=False, encoding="utf-8-sig")
     with pd.ExcelWriter(xlsx, engine="openpyxl") as writer:
         scored.to_excel(writer, sheet_name="完整评分", index=False)
         scored[scored["status"].str.startswith("主线")].to_excel(writer, sheet_name="当前主线", index=False)
         scored[scored["status"].isin(["潜在启动", "值得关注"])].sort_values("candidate_score", ascending=False).to_excel(writer, sheet_name="潜在主线", index=False)
         failures.to_excel(writer, sheet_name="抓取失败", index=False)
+        if audit_summary is not None:
+            audit_summary.to_excel(writer, sheet_name="完整性汇总", index=False)
+        if audit is not None:
+            audit[audit["is_omitted"]].to_excel(writer, sheet_name="遗漏板块", index=False)
         for ws in writer.book.worksheets:
             ws.freeze_panes = "A2"; ws.auto_filter.ref = ws.dimensions
             ws.column_dimensions["B"].width = 20
     make_dashboard(scored, dashboard)
     make_trend_chart(scored, histories, trends)
+    if audit is not None and audit_summary is not None:
+        with pd.ExcelWriter(audit_xlsx, engine="openpyxl") as writer:
+            audit_summary.to_excel(writer, sheet_name="汇总", index=False)
+            audit.to_excel(writer, sheet_name="全部板块审计", index=False)
+            audit[audit["is_omitted"]].to_excel(writer, sheet_name="遗漏板块", index=False)
+            audit[(~audit["is_omitted"]) & (audit["audit_status"] != "完整")].to_excel(
+                writer, sheet_name="质量警告", index=False,
+            )
+            for ws in writer.book.worksheets:
+                ws.freeze_panes = "A2"; ws.auto_filter.ref = ws.dimensions
+                ws.column_dimensions["C"].width = 20
+                ws.column_dimensions["L"].width = 45
+        audit[audit["is_omitted"]].to_csv(omitted_csv, index=False, encoding="utf-8-sig")
 
     main = scored[scored["status"].str.startswith("主线")].sort_values("mainline_score", ascending=False)
     candidate = scored[scored["status"].isin(["潜在启动", "值得关注"])].sort_values("candidate_score", ascending=False)
     as_of = pd.to_datetime(scored["as_of"]).max().date()
+    coverage_text = ""
+    if audit_summary is not None and not audit_summary.empty:
+        total = audit_summary[audit_summary["kind"] == "all"].iloc[0]
+        coverage_text = (
+            f"源板块全集：{int(total['source_universe'])}；主动过滤：{int(total['intentional_filtered'])}；"
+            f"扫描目标：{int(total['scan_target'])}；最终评分：{int(total['final_scored'])}；"
+            f"目标覆盖率：{total['target_coverage_pct']:.2f}%。  \n"
+        )
     report = f"""# A股板块主线判断报告
 
 数据截止：{as_of}  
 覆盖：{len(scored)} 个有效板块（行业 + 概念）；抓取失败/数据不足：{len(failures)} 个。
+{coverage_text}
 
 ## 当前主线
 
@@ -139,5 +169,7 @@ def write_outputs(
 <h1>A股板块主线雷达</h1><p>数据截止 {as_of}；共 {len(scored)} 个有效板块。</p>
 <img src='{html.escape(dashboard.name)}'><img src='{html.escape(trends.name)}'><h2>完整评分（前100）</h2>{table_html}
 """, encoding="utf-8")
-    return {"csv": full_csv, "xlsx": xlsx, "dashboard": dashboard, "trends": trends, "markdown": md, "html": html_path}
-
+    paths = {"csv": full_csv, "xlsx": xlsx, "dashboard": dashboard, "trends": trends, "markdown": md, "html": html_path}
+    if audit is not None:
+        paths.update({"audit_xlsx": audit_xlsx, "omitted_csv": omitted_csv})
+    return paths

@@ -41,3 +41,12 @@ def test_scoring_prefers_stronger_board():
     scored = score_boards(build_metric_table(boards, histories, flows)).set_index("name")
     assert scored.loc["强", "mainline_score"] > scored.loc["中", "mainline_score"] > scored.loc["弱", "mainline_score"]
 
+
+def test_cmf_proxy_fills_missing_fund_flow_and_is_labeled():
+    history = make_history(.002, 0)
+    history["high"] = history["close"] * 1.01
+    history["low"] = history["close"] * 0.98
+    boards = pd.DataFrame([{"kind": "industry", "code": "A", "name": "测试", "breadth": .6}])
+    metrics = build_metric_table(boards, {("industry", "A"): history}, pd.DataFrame())
+    assert pd.notna(metrics.loc[0, "flow_5d_pct"])
+    assert metrics.loc[0, "flow_5d_source"] == "量价代理CMF"

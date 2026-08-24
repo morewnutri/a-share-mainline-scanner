@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import html
 import logging
+import os
+import re
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+from matplotlib import font_manager
 import numpy as np
 import pandas as pd
 import seaborn as sns
@@ -14,12 +17,31 @@ KIND_CN = {"industry": "行业", "concept": "概念"}
 
 
 def configure_chinese_font() -> None:
-    plt.rcParams["font.sans-serif"] = [
+    explicit_path = os.environ.get("A_SHARE_CHINESE_FONT_PATH", "")
+    families: list[str] = []
+    if explicit_path and Path(explicit_path).is_file():
+        try:
+            font_manager.fontManager.addfont(explicit_path)
+            families.append(font_manager.FontProperties(fname=explicit_path).get_name())
+        except Exception as exc:
+            LOG.warning("中文字体文件注册失败 %s: %s", explicit_path, exc)
+    families.extend([
         "Noto Sans CJK SC", "Noto Sans CJK JP", "WenQuanYi Micro Hei",
         "Microsoft YaHei", "SimHei", "Arial Unicode MS", "DejaVu Sans",
-    ]
+    ])
+    plt.rcParams["font.family"] = families
+    plt.rcParams["font.sans-serif"] = families
     plt.rcParams["axes.unicode_minus"] = False
-    sns.set_theme(style="whitegrid", rc={"font.sans-serif": plt.rcParams["font.sans-serif"]})
+    sns.set_theme(style="whitegrid", rc={"font.family": families, "font.sans-serif": families})
+
+
+def _deduplicate_for_display(scored: pd.DataFrame, score_col: str = "mainline_score") -> pd.DataFrame:
+    """完整结果不删行；排行榜和图片合并“银行/银行Ⅱ”等同主题层级镜像。"""
+    out = scored.sort_values(score_col, ascending=False).copy()
+    out["_display_group"] = out["name"].astype(str).map(
+        lambda value: re.sub(r"[ⅠⅡⅢⅣⅤⅰⅱⅲⅳⅴ]+$", "", value.strip())
+    )
+    return out.drop_duplicates(["kind", "_display_group"]).drop(columns="_display_group")
 
 
 def _label_top(ax, data: pd.DataFrame, x: str, y: str, n: int = 12) -> None:
@@ -30,6 +52,7 @@ def _label_top(ax, data: pd.DataFrame, x: str, y: str, n: int = 12) -> None:
 
 def make_dashboard(scored: pd.DataFrame, out_path: Path) -> None:
     configure_chinese_font()
+    scored = _deduplicate_for_display(scored)
     fig, axes = plt.subplots(2, 2, figsize=(18, 13), constrained_layout=True)
     plot = scored.dropna(subset=["slope_5d", "acceleration"]).copy()
     sizes = np.clip(plot["amount_ratio_5_20"].fillna(1), .4, 3) * 55
@@ -66,6 +89,7 @@ def make_dashboard(scored: pd.DataFrame, out_path: Path) -> None:
 
 def make_trend_chart(scored: pd.DataFrame, histories: dict[tuple[str, str], pd.DataFrame], out_path: Path) -> None:
     configure_chinese_font()
+    scored = _deduplicate_for_display(scored)
     fig, ax = plt.subplots(figsize=(16, 9), constrained_layout=True)
     for _, row in scored.nlargest(10, "mainline_score").iterrows():
         h = histories[(str(row["kind"]), str(row["code"]))].tail(30)
@@ -132,8 +156,10 @@ def write_outputs(
                 ws.column_dimensions["L"].width = 45
         audit[audit["is_omitted"]].to_csv(omitted_csv, index=False, encoding="utf-8-sig")
 
-    main = scored[scored["status"].str.startswith("主线")].sort_values("mainline_score", ascending=False)
-    candidate = scored[scored["status"].isin(["潜在启动", "值得关注"])].sort_values("candidate_score", ascending=False)
+    display_scored = _deduplicate_for_display(scored)
+    main = display_scored[display_scored["status"].str.startswith("主线")].sort_values("mainline_score", ascending=False)
+    candidate = _deduplicate_for_display(scored, "candidate_score")
+    candidate = candidate[candidate["status"].isin(["潜在启动", "值得关注"])].sort_values("candidate_score", ascending=False)
     as_of = pd.to_datetime(scored["as_of"]).max().date()
     coverage_text = ""
     if audit_summary is not None and not audit_summary.empty:

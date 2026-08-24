@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -42,17 +44,28 @@ def build_completeness_audit(
         else:
             flow_sets[window] = set()
 
+    scored_map = {
+        _key(row.kind, row.code): row._asdict()
+        for row in scored.itertuples(index=False)
+    } if not scored.empty else {}
+
     reference_date: dict[str, pd.Timestamp] = {}
     reference_calendar: dict[str, pd.DatetimeIndex] = {}
+    china_now = datetime.now(ZoneInfo("Asia/Shanghai"))
+    # 盘中不要求所有数据源都已有当天收盘日线，避免把上一交易日误报为滞后。
+    completed_cutoff = pd.Timestamp(
+        china_now.date() if china_now.time() >= time(15, 15) else china_now.date() - timedelta(days=1)
+    )
     for kind in source["kind"].unique():
         kind_frames = [h for (k, _), h in histories.items() if k == kind and not h.empty]
         if not kind_frames:
             continue
         reference_date[kind] = max(pd.to_datetime(h["date"]).max() for h in kind_frames)
         best = max(kind_frames, key=lambda h: len(h))
-        reference_calendar[kind] = pd.DatetimeIndex(
+        calendar = pd.DatetimeIndex(
             pd.to_datetime(best["date"]).dropna().sort_values().unique()[-calendar_days:]
         )
+        reference_calendar[kind] = calendar[calendar <= completed_cutoff]
 
     records: list[dict[str, object]] = []
     for row in source.itertuples(index=False):
@@ -60,6 +73,7 @@ def build_completeness_audit(
         intentional_filter = key not in target_keys
         history = histories.get(key)
         error = failure_map.get(key, "")
+        scored_row = scored_map.get(key, {})
         record: dict[str, object] = {
             "kind": row.kind, "code": row.code, "name": row.name,
             "source_duplicate_code": bool(row.source_duplicate_code),
@@ -76,6 +90,14 @@ def build_completeness_audit(
             "flow_10d_matched": (str(row.kind), str(row.name)) in flow_sets[10],
             "in_final_scoring": key in scored_keys,
         }
+        for window in (1, 5, 10):
+            value = pd.to_numeric(scored_row.get(f"flow_{window}d_pct"), errors="coerce")
+            direct_matched = bool(record[f"flow_{window}d_matched"])
+            record[f"flow_{window}d_available"] = direct_matched or bool(pd.notna(value))
+            default_source = "东方财富主力资金" if direct_matched else "缺失"
+            record[f"flow_{window}d_source"] = str(
+                scored_row.get(f"flow_{window}d_source", default_source)
+            )
         if history is not None and not history.empty:
             h = history.copy()
             dates = pd.to_datetime(h["date"], errors="coerce").dropna().sort_values()
@@ -113,7 +135,7 @@ def build_completeness_audit(
             status = "行情日期缺口"
         elif key not in scored_keys:
             status = "未进入评分"
-        elif not all(record[f"flow_{w}d_matched"] for w in (1, 5, 10)):
+        elif not all(record[f"flow_{w}d_available"] for w in (1, 5, 10)):
             status = "资金流部分缺失"
         else:
             status = "完整"
@@ -141,6 +163,9 @@ def build_completeness_audit(
             "flow_1d_match_pct": round(float(target["flow_1d_matched"].mean() * 100), 2) if len(target) else np.nan,
             "flow_5d_match_pct": round(float(target["flow_5d_matched"].mean() * 100), 2) if len(target) else np.nan,
             "flow_10d_match_pct": round(float(target["flow_10d_matched"].mean() * 100), 2) if len(target) else np.nan,
+            "flow_1d_available_pct": round(float(target["flow_1d_available"].mean() * 100), 2) if len(target) else np.nan,
+            "flow_5d_available_pct": round(float(target["flow_5d_available"].mean() * 100), 2) if len(target) else np.nan,
+            "flow_10d_available_pct": round(float(target["flow_10d_available"].mean() * 100), 2) if len(target) else np.nan,
             "quality_warning_count": int(target["audit_status"].isin([
                 "行情质量异常", "行情未到最新日", "行情日期缺口", "资金流部分缺失",
             ]).sum()),

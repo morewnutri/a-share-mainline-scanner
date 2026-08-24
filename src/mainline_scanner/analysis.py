@@ -43,7 +43,7 @@ def calculate_board_metrics(history: pd.DataFrame) -> dict[str, float | str | pd
     turnover = h.get("turnover", pd.Series(index=h.index, dtype=float))
     amount20 = amount.tail(20).mean()
     turnover20 = turnover.tail(20).mean()
-    return {
+    result: dict[str, float | str | pd.Timestamp] = {
         "as_of": h["date"].iloc[-1],
         "last_close": close.iloc[-1],
         "ret_1d": _return(close, 1), "ret_3d": _return(close, 3),
@@ -61,6 +61,21 @@ def calculate_board_metrics(history: pd.DataFrame) -> dict[str, float | str | pd
         "drawdown_10d": float((close.iloc[-1] / close.tail(10).cummax() - 1).min() * 100),
         "history_days": len(h),
     }
+    # 当外部主力资金接口不可用时，用 Chaikin Money Flow 衡量量价资金压力。
+    # 这是代理指标，不等同于交易所/行情商口径的主力净流入。
+    if {"high", "low", "amount"}.issubset(h.columns):
+        high = pd.to_numeric(h["high"], errors="coerce")
+        low = pd.to_numeric(h["low"], errors="coerce")
+        amount_numeric = pd.to_numeric(h["amount"], errors="coerce")
+        spread = (high - low).replace(0, np.nan)
+        multiplier = ((2 * close - high - low) / spread).clip(-1, 1).fillna(0)
+        for window in (1, 5, 10):
+            denominator = amount_numeric.tail(window).sum(min_count=1)
+            result[f"flow_proxy_{window}d_pct"] = (
+                float((multiplier.tail(window) * amount_numeric.tail(window)).sum() / denominator * 100)
+                if denominator and np.isfinite(denominator) else np.nan
+            )
+    return result
 
 
 def build_metric_table(
@@ -83,6 +98,16 @@ def build_metric_table(
         return out
     if not flows.empty:
         out = out.merge(flows, on=["kind", "name"], how="left")
+    for window in (1, 5, 10):
+        flow_col = f"flow_{window}d_pct"
+        proxy_col = f"flow_proxy_{window}d_pct"
+        if flow_col not in out:
+            out[flow_col] = np.nan
+        direct = out[flow_col].notna()
+        out[f"flow_{window}d_source"] = np.where(direct, "东方财富主力资金", "量价代理CMF")
+        if proxy_col in out:
+            out[flow_col] = out[flow_col].fillna(out[proxy_col])
+        out.loc[out[flow_col].isna(), f"flow_{window}d_source"] = "缺失"
     out["rs_5d"] = out["ret_5d"] - out.groupby("kind")["ret_5d"].transform("median")
     out["rs_10d"] = out["ret_10d"] - out.groupby("kind")["ret_10d"].transform("median")
     out["flow_acceleration"] = out.get("flow_1d_pct", np.nan) - out.get("flow_5d_pct", np.nan)
@@ -138,4 +163,3 @@ def score_boards(metrics: pd.DataFrame) -> pd.DataFrame:
         x.loc[(x["mainline_score"] >= 80) & main_ok, "status"] = "主线核心"
         frames.append(x)
     return pd.concat(frames, ignore_index=True).sort_values("mainline_score", ascending=False)
-

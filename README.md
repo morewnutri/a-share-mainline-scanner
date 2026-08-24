@@ -64,7 +64,7 @@ mainline-scanner --limit 10
 %run colab/run_scan.py
 ```
 
-详细说明见 `colab/README.md`。脚本默认关闭概念过滤、扫描源全集，使用 Google Drive 保存缓存，并在 Colab 中直接显示排行榜、完整性表格和图片，不自动下载 ZIP。东方财富板块日线整体不可用时会切换到同花顺同名板块指数日线。
+详细说明见 `colab/README.md`。脚本默认关闭概念过滤、扫描源全集，使用 Google Drive 保存缓存，并在 Colab 中直接显示排行榜、完整性表格和图片，不自动下载 ZIP。板块日线按“东方财富 → 同花顺 → 申万研究一级/二级行业”回退；真实主力资金不可用时使用量价 CMF 代理，并在 `flow_*_source` 中明确标注，代理值不等同于真实主力净流入。
 
 ## 指标解释
 
@@ -83,4 +83,4 @@ mainline-scanner --limit 10
 
 免费网页接口可能变更或限流；程序有重试、缓存和单板块失败降级，失败项会写入 Excel。概念板块高度重叠，扫描结果应作为“发现与排序”工具，再结合政策/事件驱动、指数环境和个股确认，不构成投资建议。
 
-数据接口说明可查阅 [AKShare 行业/概念板块及历史行情文档](https://akshare.akfamily.xyz/data/stock/stock.html)；底层行情与资金流来自东方财富公开网页接口。
+数据接口说明可查阅 [AKShare 行业/概念板块及历史行情文档](https://akshare.akfamily.xyz/data/stock/stock.html)。板块目录来自东方财富公开接口；历史行情可来自东方财富、同花顺或申万研究，资金字段会标明真实主力资金或 CMF 量价代理来源。

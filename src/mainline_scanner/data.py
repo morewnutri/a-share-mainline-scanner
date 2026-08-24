@@ -5,6 +5,7 @@ import logging
 import re
 import threading
 import time
+import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -13,6 +14,7 @@ from typing import Iterable
 
 import pandas as pd
 import requests
+from urllib3.exceptions import InsecureRequestWarning
 from tenacity import retry, stop_after_attempt, wait_exponential
 from tqdm import tqdm
 
@@ -57,6 +59,8 @@ class EastmoneyAkshareProvider:
         self._eastmoney_history_available: bool | None = None
         self._fallback_lock = threading.Lock()
         self._ths_maps: dict[str, dict[str, str]] = {}
+        self._sw_map: dict[str, str] = {}
+        self._sw_history_lock = threading.Lock()
 
     def _fresh(self, path: Path) -> bool:
         if self.refresh or not path.exists():
@@ -221,6 +225,81 @@ class EastmoneyAkshareProvider:
         result["数据源"] = "同花顺"
         return result.reset_index(drop=True)
 
+    @staticmethod
+    def _compact_board_name(name: str) -> str:
+        """保留申万层级后缀的精确名称键。"""
+        return re.sub(r"[\s_（）()\-—·]", "", str(name).strip().lower())
+
+    def _load_sw_map(self) -> dict[str, str]:
+        """加载申万官方一级/二级行业指数目录。"""
+        if self._sw_map:
+            return self._sw_map
+        with self._fallback_lock:
+            if self._sw_map:
+                return self._sw_map
+            url = "https://www.swsresearch.com/institute-sw/api/index_publish/current/"
+            headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://www.swsresearch.com/"}
+            mapping: dict[str, str] = {}
+            for level in ("一级行业", "二级行业"):
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", InsecureRequestWarning)
+                    response = requests.get(
+                        url,
+                        params={"page": 1, "page_size": 1000, "indextype": level},
+                        headers=headers,
+                        timeout=30,
+                        verify=False,
+                    )
+                response.raise_for_status()
+                rows = ((response.json().get("data") or {}).get("results") or [])
+                for row in rows:
+                    item_name = str(row.get("swindexname", ""))
+                    item_code = str(row.get("swindexcode", ""))
+                    if not item_name or not item_code:
+                        continue
+                    mapping[self._compact_board_name(item_name)] = item_code
+                    mapping.setdefault(self._normalize_board_name(item_name), item_code)
+            if not mapping:
+                raise RuntimeError("申万官方目录为空")
+            self._sw_map = mapping
+            LOG.info("申万官方备用目录已加载: %d 个名称键", len(mapping))
+            return mapping
+
+    def _sw_history(self, name: str, start: str, end: str) -> pd.DataFrame:
+        """申万官方一级/二级行业指数日线备用源。"""
+        mapping = self._load_sw_map()
+        code = mapping.get(self._compact_board_name(name)) or mapping.get(self._normalize_board_name(name))
+        if not code:
+            raise LookupError(f"申万无同名一级/二级行业: {name}")
+        path = self.cache_dir / "fallback_indexes" / "sws" / f"{code}.csv"
+        # 同一申万指数可能对应东方财富的多个层级名称；串行化可避免重复下载。
+        with self._sw_history_lock:
+            if self._fresh(path):
+                result = self._read_cache(path)
+            else:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", InsecureRequestWarning)
+                    response = requests.get(
+                        "https://www.swsresearch.com/institute-sw/api/index_publish/trend/",
+                        params={"swindexcode": code, "period": "DAY"},
+                        headers={"User-Agent": "Mozilla/5.0", "Referer": "https://www.swsresearch.com/"},
+                        timeout=60,
+                        verify=False,
+                    )
+                response.raise_for_status()
+                result = pd.DataFrame(response.json().get("data") or []).rename(columns={
+                    "bargaindate": "日期", "openindex": "开盘", "maxindex": "最高",
+                    "minindex": "最低", "closeindex": "收盘", "bargainamount": "成交量",
+                    "bargainsum": "成交额", "markup": "涨跌幅",
+                })
+                if result.empty:
+                    raise RuntimeError(f"申万未返回日线: {name}")
+                result["数据源"] = "申万研究"
+                self._write_cache(result, path)
+        dates = pd.to_datetime(result["日期"], errors="coerce")
+        begin, finish = pd.to_datetime(start), pd.to_datetime(end)
+        return result.loc[dates.between(begin, finish)].reset_index(drop=True)
+
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=0.8, min=1, max=6), reraise=True)
     def _call(self, func, **kwargs) -> pd.DataFrame:
         df = func(**kwargs)
@@ -281,9 +360,17 @@ class EastmoneyAkshareProvider:
                 try:
                     raw = self._ths_history(kind, name, start, end)
                 except Exception as ths_error:
-                    raise RuntimeError(
-                        f"东方财富失败: {eastmoney_error or '端点探测已判定不可用'}; 同花顺失败: {ths_error}"
-                    ) from ths_error
+                    sw_error: Exception | str = "仅行业板块适用"
+                    if kind == "industry":
+                        try:
+                            raw = self._sw_history(name, start, end)
+                        except Exception as exc:
+                            sw_error = exc
+                    if raw.empty:
+                        raise RuntimeError(
+                            f"东方财富失败: {eastmoney_error or '端点探测已判定不可用'}; "
+                            f"同花顺失败: {ths_error}; 申万失败: {sw_error}"
+                        ) from ths_error
             self._write_cache(raw, path)
         if raw.empty:
             return raw
@@ -331,6 +418,11 @@ class EastmoneyAkshareProvider:
                         self._load_ths_map(kind)
                     except Exception as map_error:
                         LOG.warning("同花顺 %s 备用目录加载失败: %s", kind, map_error)
+                if "industry" in set(boards["kind"].astype(str)):
+                    try:
+                        self._load_sw_map()
+                    except Exception as map_error:
+                        LOG.warning("申万行业备用目录加载失败: %s", map_error)
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = {
                 pool.submit(self.get_history, str(r["kind"]), str(r["code"]), str(r["name"]), start, end): r

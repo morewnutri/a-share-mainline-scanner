@@ -71,12 +71,12 @@ def make_dashboard(scored: pd.DataFrame, out_path: Path) -> None:
     axes[0, 1].axvline(68, color="#f39c12", ls="--", lw=1); axes[0, 1].axvline(80, color="#c0392b", ls="--", lw=1)
     axes[0, 1].set(title="主线综合评分", xlabel="0–100")
 
-    cand = scored[scored["status"].isin(["潜在启动", "值得关注"])].nlargest(18, "candidate_score").sort_values("candidate_score")
+    cand = scored[scored.get("lifecycle", pd.Series(index=scored.index, dtype=str)).isin(["Seed", "Ignition"])].nlargest(18, "ignition_score").sort_values("ignition_score")
     if cand.empty:
-        cand = scored.nlargest(18, "candidate_score").sort_values("candidate_score")
-    axes[1, 0].barh(cand["name"], cand["candidate_score"], color="#8e44ad")
-    axes[1, 0].axvline(65, color="#777", ls="--", lw=1); axes[1, 0].axvline(75, color="#222", ls="--", lw=1)
-    axes[1, 0].set(title="潜在主线（启动）评分", xlabel="0–100")
+        cand = scored.nlargest(18, "ignition_score").sort_values("ignition_score")
+    axes[1, 0].barh(cand["name"], cand["ignition_score"], color="#8e44ad")
+    axes[1, 0].axvline(60, color="#777", ls="--", lw=1); axes[1, 0].axvline(72, color="#222", ls="--", lw=1)
+    axes[1, 0].set(title="新主线火种（Ignition）评分", xlabel="0–100")
 
     heat = scored.nlargest(20, "mainline_score").set_index("name")[["ret_1d", "ret_3d", "ret_5d", "ret_10d", "ret_20d"]]
     heat.columns = ["1日", "3日", "5日", "10日", "20日"]
@@ -103,7 +103,7 @@ def make_trend_chart(scored: pd.DataFrame, histories: dict[tuple[str, str], pd.D
 
 
 def _fmt_table(df: pd.DataFrame, n: int = 20) -> str:
-    cols = ["kind", "name", "status", "mainline_score", "candidate_score", "ret_5d", "ret_10d", "slope_5d", "acceleration", "flow_5d_pct", "breadth", "amount_ratio_5_20"]
+    cols = ["kind", "name", "lifecycle", "mainline_score", "ignition_score", "confirmation_score", "ret_5d", "ret_10d", "slope_5d", "acceleration", "flow_5d_pct", "breadth", "amount_ratio_5_20"]
     cols = [c for c in cols if c in df]
     x = df[cols].head(n).copy()
     if "kind" in x: x["kind"] = x["kind"].map(KIND_CN).fillna(x["kind"])
@@ -131,6 +131,10 @@ def write_outputs(
     with pd.ExcelWriter(xlsx, engine="openpyxl") as writer:
         scored.to_excel(writer, sheet_name="完整评分", index=False)
         scored[scored["status"].str.startswith("主线")].to_excel(writer, sheet_name="当前主线", index=False)
+        if "lifecycle" in scored:
+            scored[scored["lifecycle"].isin(["Seed", "Ignition"])].sort_values("ignition_score", ascending=False).to_excel(
+                writer, sheet_name="火种雷达", index=False,
+            )
         scored[scored["status"].isin(["潜在启动", "值得关注"])].sort_values("candidate_score", ascending=False).to_excel(writer, sheet_name="潜在主线", index=False)
         failures.to_excel(writer, sheet_name="抓取失败", index=False)
         if audit_summary is not None:
@@ -158,8 +162,8 @@ def write_outputs(
 
     display_scored = _deduplicate_for_display(scored)
     main = display_scored[display_scored["status"].str.startswith("主线")].sort_values("mainline_score", ascending=False)
-    candidate = _deduplicate_for_display(scored, "candidate_score")
-    candidate = candidate[candidate["status"].isin(["潜在启动", "值得关注"])].sort_values("candidate_score", ascending=False)
+    candidate = _deduplicate_for_display(scored, "ignition_score")
+    candidate = candidate[candidate.get("lifecycle", pd.Series(index=candidate.index, dtype=str)).isin(["Seed", "Ignition"])].sort_values("ignition_score", ascending=False)
     as_of = pd.to_datetime(scored["as_of"]).max().date()
     coverage_text = ""
     if audit_summary is not None and not audit_summary.empty:
@@ -179,15 +183,17 @@ def write_outputs(
 
 {_fmt_table(main if not main.empty else scored.sort_values('mainline_score', ascending=False), 20)}
 
-## 可能成为下一主线的板块
+## 火种/点火板块
 
 {_fmt_table(candidate if not candidate.empty else scored.sort_values('candidate_score', ascending=False), 20)}
 
 ## 判定逻辑
 
 - **主线分**：5/10 日涨幅、趋势斜率及拟合质量、相对强弱、5/10 日主力净流入占比、上涨家数占比、量能和上涨持续性。
-- **启动分**：3 日斜率、斜率加速度、5 日相对强弱、当日/5 日资金变化、量价扩张、突破位置和市场广度；对 10 日暴涨或显著偏离 20 日均线的板块扣除拥挤分。
-- “潜在启动”要求短斜率与加速度均为正、10 日尚未过度上涨；“主线核心”要求趋势与 10 日收益为正且市场广度不弱。
+- **火种分**：优先使用排名跃迁、广度增量、板块成交额份额增量、同口径资金强度变化；快照历史不足时才更多依赖当日加速度与量能异常。过去 5/10 日已经大涨会扣分。
+- **确认分**（兼容字段 `candidate_score`）：保留原有短斜率、加速度、相对强弱和量价扩张逻辑，用于确认扩散，而不再冒充真正的早期发现分。
+- 生命周期为 `Dormant → Seed → Ignition → Diffusion → Mainline → Crowded/Decay`；首次运行缺少排名和广度轨迹，连续保存快照后火种分才具备完整信息。
+- 东方财富主力资金与 CMF 代理分别做横截面标准化，CMF 信号按较低置信度收缩；资金加速度也只在同口径内计算。
 
 > 这是量价与资金行为筛选器，不是收益保证或买卖建议。板块概念存在重叠，应用时还需结合政策/事件驱动、指数环境、个股位置与风险预算复核。
 """

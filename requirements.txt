@@ -6,4 +6,5 @@ seaborn>=0.13
 openpyxl>=3.1
 tenacity>=8.2
 tqdm>=4.66
+baostock>=0.9.3,<1
 

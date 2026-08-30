@@ -50,3 +50,23 @@ def test_cmf_proxy_fills_missing_fund_flow_and_is_labeled():
     metrics = build_metric_table(boards, {("industry", "A"): history}, pd.DataFrame())
     assert pd.notna(metrics.loc[0, "flow_5d_pct"])
     assert metrics.loc[0, "flow_5d_source"] == "量价代理CMF"
+    assert metrics.loc[0, "flow_5d_confidence"] == .55
+
+
+def test_flow_acceleration_compares_only_same_source_and_daily_intensity():
+    boards = pd.DataFrame([
+        {"kind": "industry", "code": "A", "name": "真实", "breadth": .6},
+        {"kind": "industry", "code": "B", "name": "代理", "breadth": .6},
+    ])
+    histories = {("industry", "A"): make_history(), ("industry", "B"): make_history()}
+    for history in histories.values():
+        history["high"] = history["close"] * 1.01
+        history["low"] = history["close"] * .98
+    flows = pd.DataFrame({
+        "kind": ["industry"], "name": ["真实"],
+        "flow_1d_pct": [6.0], "flow_5d_pct": [10.0], "flow_10d_pct": [12.0],
+    })
+    metrics = build_metric_table(boards, histories, flows).set_index("name")
+    assert metrics.loc["真实", "flow_acceleration"] == 4.0
+    assert metrics.loc["真实", "flow_acceleration_source"].startswith("东方财富同口径")
+    assert metrics.loc["代理", "flow_acceleration_source"] == "CMF同口径变化"

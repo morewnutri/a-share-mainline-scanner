@@ -82,6 +82,7 @@ def build_completeness_audit(
             "fetch_error": error,
             "history_source": "",
             "history_rows": 0, "history_start": pd.NaT, "history_end": pd.NaT,
+            "synthetic_constituents": np.nan, "synthetic_coverage": np.nan,
             "stale_trading_days": np.nan, "missing_trading_days_count": 0,
             "missing_trading_dates": "", "duplicate_dates": 0,
             "invalid_close_rows": 0, "invalid_ohlc_rows": 0,
@@ -104,6 +105,10 @@ def build_completeness_audit(
             record["history_rows"] = len(h)
             if "data_source" in h and h["data_source"].notna().any():
                 record["history_source"] = str(h["data_source"].dropna().iloc[-1])
+            if "constituent_count" in h:
+                record["synthetic_constituents"] = pd.to_numeric(h["constituent_count"], errors="coerce").median()
+            if "synthetic_coverage" in h:
+                record["synthetic_coverage"] = pd.to_numeric(h["synthetic_coverage"], errors="coerce").mean()
             record["history_start"] = dates.min() if not dates.empty else pd.NaT
             record["history_end"] = dates.max() if not dates.empty else pd.NaT
             record["duplicate_dates"] = int(dates.duplicated().sum())

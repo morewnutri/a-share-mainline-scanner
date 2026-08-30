@@ -1,86 +1,160 @@
-# A股行业/概念板块主线扫描器
+# A股主线生命周期扫描器
 
-该程序从东方财富（经 AKShare）导入完整的行业与概念板块列表、近约 50 个交易日的板块日线，以及行业/概念今日、5 日、10 日主力资金排名。它计算涨跌幅、趋势一阶导、加速度、趋势稳定性、相对强弱、量能/换手扩张、市场广度、主力资金、突破位置与拥挤度，输出当前主线和可能启动的下一主线。
+项目同时保留两条识别路径：
+
+1. **主线确认层**：根据板块趋势、相对强弱、资金、广度、量能与拥挤度识别已经扩散的主线；
+2. **火种发现层**：保存每次评分快照，优先观察排名跃迁、广度扩张、板块成交额份额迁移和同口径资金强度变化，尽量在过去 5 日涨幅仍不高时发现 `Seed / Ignition`。
+
+生命周期输出为：
+
+```text
+Dormant → Seed → Ignition → Diffusion → Mainline → Crowded / Decay
+```
+
+`candidate_score` 为兼容 1.x 保留，等同于新的 `confirmation_score`。真正用于早期雷达的是 `ignition_score`。
 
 ## 安装与运行
-
-在项目目录中执行：
 
 ```powershell
 python -m pip install -e .
 mainline-scanner
 ```
 
-也可以不用命令入口：
+也可以直接运行模块：
 
 ```powershell
 python -m mainline_scanner.cli --board-types industry concept --workers 3
 ```
 
-首次全量扫描为数百至近千个板块，耗时取决于东方财富接口和网络。后续运行会复用 `data/cache` 中 8 小时内的缓存。
-
-实际板块数由东方财富当天分类决定；新版细分行业与概念合计可能接近 1,000 个。程序会分页读取全集，不使用写死的板块清单。
-
 常用参数：
 
 ```powershell
-# 只扫描行业，速度最快
+# 只扫描行业
 mainline-scanner --board-types industry
 
-# 强制更新数据
+# 忽略缓存并重抓
 mainline-scanner --refresh
 
-# 接口限流/不稳定时降低并发
-mainline-scanner --workers 4
-
-# 调试：每类只抓前 10 个
+# 每类只扫描前 10 个，用于调试
 mainline-scanner --limit 10
+
+# 启用 BaoStock 行业合成回退
+mainline-scanner --baostock-mode industry
+
+# 行业和概念均尝试按成分股合成；首次运行明显更慢
+mainline-scanner --baostock-mode all --baostock-max-constituents 24
+
+# 扫描后同时回放已有历史快照
+mainline-scanner --backtest
 ```
+
+## 实时与历史缓存
+
+实时板块列表和资金流默认缓存 **5 分钟**，历史日线默认缓存 **24 小时**，两者不再共用原来的 8 小时 TTL。东方财富实时域名 `push2` 优先，`push2delay` 只作兜底。
+
+```powershell
+mainline-scanner --snapshot-cache-minutes 3 --cache-hours 24
+```
+
+每次运行默认在 `data/snapshots/` 保存带时间戳的压缩 CSV。同一日多次运行可形成盘中 `breadth_delta_intraday` 和 `amount_share_delta_intraday`；跨日运行可形成：
+
+- `confirmation_score_rank_velocity_1d/3d`
+- `confirmation_score_delta_1d`
+- `breadth_delta_1d`
+- `amount_share_delta_1d`
+- `snapshot_history_coverage`
+
+首次运行没有历史轨迹，`ignition_score` 只能使用当日异常特征；连续保存快照后才具备完整的早期识别信息。
+
+## 数据源与缺失回退
+
+板块日线依次尝试：
+
+| 顺序 | 数据源 | 适用范围 | 说明 |
+| --- | --- | --- | --- |
+| 1 | 东方财富 | 行业、概念 | 原始板块指数日线；连续探测 3 个板块后才判定端点整体不可用 |
+| 2 | 同花顺 | 行业、概念 | 按标准化名称映射备用指数 |
+| 3 | 申万研究 | 一级/二级行业 | 申万官方行业指数 |
+| 4 | BaoStock 成分股等权合成 | 行业；可选概念 | 不是原始板块指数，明确标记合成来源和有效成分股覆盖率 |
+
+BaoStock 不提供东方财富概念指数，不能直接补齐所有 `BKxxxx`。本项目使用它的个股日线和行业分类构造等权合成指数；`--baostock-mode all` 还会先获取概念成分股，再用 BaoStock 个股日线合成。为了控制免费接口压力，每个板块默认固定抽取最多 24 只成分股，并共享个股缓存。
+
+因此合成回退适合“让板块不完全缺席”和交叉确认，不应与原始指数点位混为一谈。完整性审计新增：
+
+- `history_source=BaoStock成分股等权合成`
+- `synthetic_constituents`
+- `synthetic_coverage`
+
+`--baostock-mode` 默认关闭，避免全量扫描首次运行因数千只个股请求而耗时过长。建议先用 `industry`，确有需要再使用 `all`。
+
+## 资金口径修正
+
+真实主力净流入占比和 CMF 量价代理不再混在同一个横截面直接排名：
+
+- 每种来源分别标准化；
+- CMF 代理按 0.55 置信度向中性值收缩；
+- 真实资金变化采用“今日净流入占比 - 5 日每日均值”；
+- CMF 变化只与 CMF 比较；不同来源组合标记为不可比。
+
+输出保留 `flow_*_source`、`flow_*_confidence` 和 `flow_acceleration_source`，便于二次筛选。
+
+## 火种分与确认分
+
+`ignition_score` 主要使用：
+
+- 1/3 日火种排名跃迁；
+- 确认分变化；
+- 跨日和盘中广度增量；
+- 板块成交额同类份额增量；
+- 同口径资金强度变化；
+- 价格加速度、当日异常和量能扩张。
+
+过去 5/10 日已经大涨会对火种分扣分。`mainline_score` 继续承担主线确认，`confirmation_score` 保留原有短趋势确认逻辑。
+
+注意：当前版本已落地板块轨迹型火种层，但“全 A 个股异常 → 概念反向投票 → 重叠概念聚类”仍属于下一阶段，不能把当前火种分理解成完整的个股异常聚类引擎。
+
+## 历史回放
+
+积累至少数日快照后运行：
+
+```powershell
+mainline-backtest --snapshot-dir data/snapshots --output-dir reports/backtest
+```
+
+输出 `火种信号回放明细.csv` 和 `火种信号回放汇总.csv`，评估：
+
+- `precision_at_10`
+- `false_start_rate`
+- `median_lead_time_sessions`
+- `median_alert_ret_5d`
+- `mean_forward_rs_3d/5d/10d`
+
+这是对扫描器“是否提前发现”的评估，不是买卖收益回测。
+
+## 输出文件
 
 默认输出到 `reports/latest/`：
 
-- `板块完整评分.csv`：适合二次分析的完整数据；
-- `板块主线扫描.xlsx`：完整评分、当前主线、潜在主线、失败记录四个工作表；
-- `主线雷达.png`：趋势速度/加速度、主线榜、潜在榜、多周期热力图；
-- `领先板块走势.png`：前十板块近 30 个交易日归一化走势；
-- `主线判断报告.md/.html`：可直接阅读的判断报告。
-- `数据完整性审计.xlsx`：源全集、扫描目标、行情、资金流与最终评分的逐板块对账；
-- `遗漏板块明细.csv`：所有未进入最终评分的板块及具体原因。
-
-## 数据完整性审计
-
-程序会区分“主动过滤”和真正的数据遗漏，并检测日线不足、重复日期、无效 OHLC、行情滞后、交易日缺口、资金流匹配缺失以及未进入评分等情况。`数据完整性审计.xlsx` 包含“汇总”“全部板块审计”“遗漏板块”“质量警告”四个工作表。
-
-审计覆盖的是“东方财富返回的板块全集进入分析流水线后是否丢失”。它不能证明东方财富自身覆盖了同花顺、申万或中证定义的所有板块；数据源级别的完整性需要再接入第二套板块目录交叉核验。
+- `板块完整评分.csv`
+- `板块主线扫描.xlsx`（含“火种雷达”工作表）
+- `主线雷达.png`
+- `领先板块走势.png`
+- `主线判断报告.md/.html`
+- `数据完整性审计.xlsx`
+- `遗漏板块明细.csv`
 
 ## Google Colab
-
-确保最新修改已经推送到 GitHub 后，在 Colab 中运行：
 
 ```python
 !git clone https://github.com/morewnutri/a-share-mainline-scanner.git
 %cd /content/a-share-mainline-scanner
-!ls -la colab
 %run colab/run_scan.py
 ```
 
-详细说明见 `colab/README.md`。脚本默认关闭概念过滤、扫描源全集，使用 Google Drive 保存缓存，并在 Colab 中直接显示排行榜、完整性表格和图片，不自动下载 ZIP。板块日线按“东方财富 → 同花顺 → 申万研究一级/二级行业”回退；真实主力资金不可用时使用量价 CMF 代理，并在 `flow_*_source` 中明确标注，代理值不等同于真实主力净流入。
-
-## 指标解释
-
-- `slope_3d/5d/10d`：对收盘指数取对数后做线性回归，表示每日趋势涨速（%/交易日），比简单首尾涨幅更抗单日噪声。
-- `acceleration`：当前 3 日斜率减去三日前的 5 日斜率，捕捉刚开始提速的板块。
-- `trend_r2_*`：趋势回归拟合优度，区分稳定推进和脉冲式异动。
-- `rs_5d/10d`：相对同类板块中位数的超额涨幅。
-- `amount_ratio_5_20`、`turnover_ratio_5_20`：近期量能/换手相对 20 日均值的扩张。
-- `breadth`：实时上涨家数 /（上涨家数 + 下跌家数），避免只靠少数权重股拉指数。
-- `flow_*d_pct`：主力净流入占比；金额不直接跨板块比较，以降低板块规模偏差。
-- `distance_ma20`、`distance_high20`：均线偏离与突破位置；对末端暴涨和过度偏离扣拥挤分。
-
-`主线分`重视趋势持续、相对强弱、资金和广度；`启动分`更重视短期斜率加速、资金改善和量价扩张，并惩罚已经过热的板块。评分是同类板块内的横截面百分位，适合每天收盘后固定运行、观察排名变化。
+`colab/run_scan.py` 会把评分快照与行情缓存一起持久化到 Google Drive。可在脚本顶部设置 `BAOSTOCK_MODE = "industry"` 或 `"all"`。
 
 ## 使用边界
 
-免费网页接口可能变更或限流；程序有重试、缓存和单板块失败降级，失败项会写入 Excel。概念板块高度重叠，扫描结果应作为“发现与排序”工具，再结合政策/事件驱动、指数环境和个股确认，不构成投资建议。
+免费网页接口可能变更或限流；程序有重试、缓存、跨源回退和逐板块审计。概念板块高度重叠，成交额份额适合观察同一板块随时间的变化，不代表互斥市场份额。结果是发现与排序工具，不构成投资建议。
 
-数据接口说明可查阅 [AKShare 行业/概念板块及历史行情文档](https://akshare.akfamily.xyz/data/stock/stock.html)。板块目录来自东方财富公开接口；历史行情可来自东方财富、同花顺或申万研究，资金字段会标明真实主力资金或 CMF 量价代理来源。
+接口说明可参考 [AKShare 股票数据文档](https://akshare.akfamily.xyz/data/stock/stock.html) 与 [BaoStock 官方站点](http://baostock.com/)。

@@ -1,4 +1,5 @@
-from datetime import timedelta
+import os
+from datetime import datetime, timedelta
 
 import pandas as pd
 
@@ -54,3 +55,16 @@ def test_industry_history_falls_back_to_sw_after_ths_fails(tmp_path):
     result = provider.get_history("industry", "BK0002", "测试行业", "20250101", "20250228")
     assert len(result) == 20
     assert result["data_source"].eq("申万研究").all()
+
+
+def test_snapshot_and_history_use_separate_cache_ttl(tmp_path):
+    path = tmp_path / "cache.csv"
+    path.write_text("x\n1\n", encoding="utf-8")
+    ten_minutes_ago = (datetime.now() - timedelta(minutes=10)).timestamp()
+    os.utime(path, (ten_minutes_ago, ten_minutes_ago))
+    provider = object.__new__(EastmoneyAkshareProvider)
+    provider.refresh = False
+    provider.ttl = timedelta(hours=24)
+    provider.snapshot_ttl = timedelta(minutes=5)
+    assert provider._fresh(path)
+    assert not provider._fresh_snapshot(path)

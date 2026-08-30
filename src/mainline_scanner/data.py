@@ -55,11 +55,24 @@ class FetchResult:
 class EastmoneyAkshareProvider:
     """通过 AKShare 获取东方财富行业/概念数据，并做本地缓存。"""
 
-    def __init__(self, cache_dir: Path, refresh: bool = False, ttl_hours: float = 8):
+    def __init__(
+        self,
+        cache_dir: Path,
+        refresh: bool = False,
+        ttl_hours: float = 24,
+        snapshot_ttl_minutes: float = 5,
+        baostock_mode: str = "off",
+        baostock_max_constituents: int = 24,
+    ):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.refresh = refresh
         self.ttl = timedelta(hours=ttl_hours)
+        self.snapshot_ttl = timedelta(minutes=snapshot_ttl_minutes)
+        if baostock_mode not in {"off", "industry", "all"}:
+            raise ValueError("baostock_mode 必须是 off/industry/all")
+        self.baostock_mode = baostock_mode
+        self.baostock_max_constituents = baostock_max_constituents
         try:
             import akshare as ak
         except ImportError as exc:
@@ -70,11 +83,15 @@ class EastmoneyAkshareProvider:
         self._ths_maps: dict[str, dict[str, str]] = {}
         self._sw_map: dict[str, str] = {}
         self._sw_history_lock = threading.Lock()
+        self._baostock_provider = None
 
-    def _fresh(self, path: Path) -> bool:
+    def _fresh(self, path: Path, ttl: timedelta | None = None) -> bool:
         if self.refresh or not path.exists():
             return False
-        return datetime.now() - datetime.fromtimestamp(path.stat().st_mtime) <= self.ttl
+        return datetime.now() - datetime.fromtimestamp(path.stat().st_mtime) <= (ttl or self.ttl)
+
+    def _fresh_snapshot(self, path: Path) -> bool:
+        return self._fresh(path, getattr(self, "snapshot_ttl", timedelta(minutes=5)))
 
     def _read_cache(self, path: Path) -> pd.DataFrame:
         return pd.read_csv(path, encoding="utf-8-sig")
@@ -84,8 +101,8 @@ class EastmoneyAkshareProvider:
         df.to_csv(path, index=False, encoding="utf-8-sig")
 
     def _eastmoney_json(self, endpoint: str, params: dict, timeout: int = 15) -> dict:
-        """优先使用延迟行情域名；部分网络无法访问数字分片域名。"""
-        hosts = ["https://push2delay.eastmoney.com", "https://push2.eastmoney.com"]
+        """实时域名优先；延迟域名只在实时端点不可用时兜底。"""
+        hosts = ["https://push2.eastmoney.com", "https://push2delay.eastmoney.com"]
         last_error: Exception | None = None
         headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://quote.eastmoney.com/"}
         for host in hosts:
@@ -101,7 +118,7 @@ class EastmoneyAkshareProvider:
 
     def _direct_universe(self, kind: str) -> pd.DataFrame:
         fs = "m:90 t:2 f:!50" if kind == "industry" else "m:90 t:3 f:!50"
-        fields = "f2,f3,f4,f8,f12,f14,f20,f104,f105,f128,f136"
+        fields = "f2,f3,f4,f6,f8,f12,f14,f20,f104,f105,f128,f136"
         rows: list[dict] = []
         page = 1
         while True:
@@ -119,7 +136,7 @@ class EastmoneyAkshareProvider:
         raw = pd.DataFrame(rows)
         raw.rename(columns={
             "f14": "板块名称", "f12": "板块代码", "f2": "最新价", "f4": "涨跌额",
-            "f3": "涨跌幅", "f20": "总市值", "f8": "换手率", "f104": "上涨家数",
+            "f3": "涨跌幅", "f6": "成交额", "f20": "总市值", "f8": "换手率", "f104": "上涨家数",
             "f105": "下跌家数", "f128": "领涨股票", "f136": "领涨股票-涨跌幅",
         }, inplace=True)
         raw.insert(0, "排名", range(1, len(raw) + 1))
@@ -309,6 +326,30 @@ class EastmoneyAkshareProvider:
         begin, finish = pd.to_datetime(start), pd.to_datetime(end)
         return result.loc[dates.between(begin, finish)].reset_index(drop=True)
 
+    def _constituent_codes(self, kind: str, name: str) -> list[str]:
+        """为 BaoStock 合成回退解析成分股；失败时由调用方记录完整原因。"""
+        func = self.ak.stock_board_industry_cons_em if kind == "industry" else self.ak.stock_board_concept_cons_em
+        raw = self._call(func, symbol=name)
+        code_col = _find_col(raw.columns, "代码", "股票代码")
+        if code_col is None:
+            raise ValueError(f"{name} 成分股字段异常: {list(raw.columns)}")
+        return raw[code_col].dropna().astype(str).tolist()
+
+    def _baostock_history(self, kind: str, name: str, start: str, end: str) -> pd.DataFrame:
+        mode = getattr(self, "baostock_mode", "off")
+        if mode == "off" or (mode == "industry" and kind != "industry"):
+            raise RuntimeError("未为该板块类型启用 BaoStock 回退")
+        with self._fallback_lock:
+            if self._baostock_provider is None:
+                from .baostock_fallback import BaoStockSyntheticProvider
+
+                self._baostock_provider = BaoStockSyntheticProvider(
+                    self.cache_dir,
+                    self._constituent_codes,
+                    max_constituents=getattr(self, "baostock_max_constituents", 24),
+                )
+        return self._baostock_provider.get_history(kind, name, start, end)
+
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=0.8, min=1, max=6), reraise=True)
     def _call(self, func, **kwargs) -> pd.DataFrame:
         df = func(**kwargs)
@@ -318,7 +359,7 @@ class EastmoneyAkshareProvider:
 
     def get_universe(self, kind: str) -> pd.DataFrame:
         path = self.cache_dir / f"universe_{kind}.csv"
-        if self._fresh(path):
+        if self._fresh_snapshot(path):
             raw = self._read_cache(path)
         else:
             try:
@@ -332,6 +373,7 @@ class EastmoneyAkshareProvider:
             _find_col(raw.columns, "板块名称", "名称"): "name",
             _find_col(raw.columns, "板块代码", "代码"): "code",
             _find_col(raw.columns, "涨跌幅"): "snapshot_return",
+            _find_col(raw.columns, "成交额"): "snapshot_amount",
             _find_col(raw.columns, "换手率"): "snapshot_turnover",
             _find_col(raw.columns, "上涨家数"): "up_count",
             _find_col(raw.columns, "下跌家数"): "down_count",
@@ -342,7 +384,7 @@ class EastmoneyAkshareProvider:
         if "name" not in out or "code" not in out:
             raise ValueError(f"板块列表字段不符合预期: {list(raw.columns)}")
         out["kind"] = kind
-        for col in ["snapshot_return", "snapshot_turnover", "up_count", "down_count"]:
+        for col in ["snapshot_return", "snapshot_amount", "snapshot_turnover", "up_count", "down_count"]:
             if col in out:
                 out[col] = pd.to_numeric(out[col], errors="coerce")
         if {"up_count", "down_count"}.issubset(out.columns):
@@ -375,10 +417,17 @@ class EastmoneyAkshareProvider:
                             raw = self._sw_history(name, start, end)
                         except Exception as exc:
                             sw_error = exc
+                    baostock_error: Exception | str = "未启用"
+                    if raw.empty and getattr(self, "baostock_mode", "off") != "off":
+                        try:
+                            raw = self._baostock_history(kind, name, start, end)
+                        except Exception as exc:
+                            baostock_error = exc
                     if raw.empty:
                         raise RuntimeError(
                             f"东方财富失败: {eastmoney_error or '端点探测已判定不可用'}; "
-                            f"同花顺失败: {ths_error}; 申万失败: {sw_error}"
+                            f"同花顺失败: {ths_error}; 申万失败: {sw_error}; "
+                            f"BaoStock失败: {baostock_error}"
                         ) from ths_error
             self._write_cache(raw, path)
         if raw.empty:
@@ -413,15 +462,21 @@ class EastmoneyAkshareProvider:
             if not self._fresh(self._history_path(str(r["kind"]), str(r["code"]), str(r["name"])))
         ]
         if uncached and self._eastmoney_history_available is None:
-            probe = uncached[0]
-            try:
-                raw = self._direct_history(str(probe["code"]), start, end)
-                self._eastmoney_history_available = True
-                self._write_cache(raw, self._history_path(str(probe["kind"]), str(probe["code"]), str(probe["name"])))
-                LOG.info("东方财富板块日线端点可用")
-            except Exception as exc:
+            probe_errors = []
+            for probe in uncached[:3]:
+                try:
+                    raw = self._direct_history(str(probe["code"]), start, end)
+                    if raw.empty:
+                        raise RuntimeError("端点返回空日线")
+                    self._eastmoney_history_available = True
+                    self._write_cache(raw, self._history_path(str(probe["kind"]), str(probe["code"]), str(probe["name"])))
+                    LOG.info("东方财富板块日线端点可用")
+                    break
+                except Exception as exc:
+                    probe_errors.append(exc)
+            if self._eastmoney_history_available is not True:
                 self._eastmoney_history_available = False
-                LOG.warning("东方财富板块日线整体不可用，切换同花顺备用源: %s", exc)
+                LOG.warning("东方财富板块日线连续 %d 次探测失败，切换备用源: %s", len(probe_errors), probe_errors[-1])
                 for kind in boards["kind"].astype(str).unique():
                     try:
                         self._load_ths_map(kind)
@@ -457,7 +512,7 @@ class EastmoneyAkshareProvider:
             for indicator, window in [("今日", 1), ("5日", 5), ("10日", 10)]:
                 path = self.cache_dir / f"flow_{kind}_{window}.csv"
                 try:
-                    if self._fresh(path):
+                    if self._fresh_snapshot(path):
                         raw = self._read_cache(path)
                     else:
                         raw = self._direct_fund_flow(kind, window)

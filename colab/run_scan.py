@@ -13,6 +13,7 @@ LOOKBACK_CALENDAR_DAYS = 75
 REFRESH = False
 SCAN_ALL_SOURCE_BOARDS = True
 USE_GOOGLE_DRIVE_CACHE = True
+BAOSTOCK_MODE = "off"  # industry 较慢；all 还会合成概念，首次运行可能很慢
 # ====================
 
 
@@ -45,8 +46,10 @@ def main() -> None:
     if USE_GOOGLE_DRIVE_CACHE:
         drive.mount("/content/drive", force_remount=False)
         cache_dir = Path("/content/drive/MyDrive/a-share-mainline-scanner/cache")
+        snapshot_dir = Path("/content/drive/MyDrive/a-share-mainline-scanner/snapshots")
     else:
         cache_dir = Path("/content/a-share-mainline-cache")
+        snapshot_dir = Path("/content/a-share-mainline-snapshots")
     output_dir = Path("/content/a-share-mainline-results")
     cache_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -59,6 +62,9 @@ def main() -> None:
         "--cache-dir", str(cache_dir),
         "--output-dir", str(output_dir),
         "--cache-hours", "24",
+        "--snapshot-cache-minutes", "5",
+        "--snapshot-dir", str(snapshot_dir),
+        "--baostock-mode", BAOSTOCK_MODE,
     ]
     if REFRESH:
         command.append("--refresh")
@@ -74,7 +80,7 @@ def main() -> None:
         r"[ⅠⅡⅢⅣⅤⅰⅱⅲⅳⅴ]+$", "", regex=True,
     )
     columns = [
-        "kind", "name", "status", "mainline_score", "candidate_score",
+        "kind", "name", "lifecycle", "mainline_score", "ignition_score", "confirmation_score",
         "ret_1d", "ret_5d", "ret_10d", "slope_3d", "slope_5d",
         "acceleration", "flow_1d_pct", "flow_5d_pct", "breadth",
         "flow_1d_source", "flow_5d_source",
@@ -85,10 +91,10 @@ def main() -> None:
         display_scored["status"].astype(str).str.startswith("主线")
     ].sort_values("mainline_score", ascending=False).drop_duplicates(["kind", "_display_group"])
     display(main_rank[columns].head(30))
-    display(Markdown("## 潜在启动 Top 30"))
+    display(Markdown("## 火种 / 点火 Top 30"))
     candidate_rank = display_scored[
-        display_scored["status"].isin(["潜在启动", "值得关注"])
-    ].sort_values("candidate_score", ascending=False).drop_duplicates(["kind", "_display_group"])
+        display_scored["lifecycle"].isin(["Seed", "Ignition"])
+    ].sort_values("ignition_score", ascending=False).drop_duplicates(["kind", "_display_group"])
     display(candidate_rank[columns].head(30))
 
     audit_file = output_dir / "数据完整性审计.xlsx"

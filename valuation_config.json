@@ -1,0 +1,347 @@
+{
+  "report_date": "20260630",
+  "prior_report_date": "20250630",
+  "annual_report_date": "20251231",
+  "history_min_points": 30,
+  "sectors": {
+    "AI算力": {
+      "model": "growth_pe",
+      "boards": [
+        {
+          "kind": "concept",
+          "aliases": [
+            "算力概念",
+            "算力",
+            "算力租赁"
+          ]
+        },
+        {
+          "kind": "concept",
+          "aliases": [
+            "CPO概念",
+            "CPO"
+          ]
+        },
+        {
+          "kind": "concept",
+          "aliases": [
+            "液冷服务器",
+            "液冷概念"
+          ]
+        },
+        {
+          "kind": "concept",
+          "aliases": [
+            "数据中心",
+            "数据中心概念"
+          ]
+        }
+      ],
+      "target_peg": 1.25,
+      "growth_floor_pct": 15,
+      "growth_cap_pct": 55,
+      "fair_pe_floor": 22,
+      "fair_pe_cap": 60,
+      "bootstrap_metric": "pe",
+      "bootstrap_fair": 24.48,
+      "bootstrap_asof": "2026-09-03"
+    },
+    "半导体": {
+      "model": "growth_pe",
+      "boards": [
+        {
+          "kind": "industry",
+          "aliases": [
+            "半导体"
+          ]
+        },
+        {
+          "kind": "concept",
+          "aliases": [
+            "半导体概念",
+            "芯片概念"
+          ]
+        }
+      ],
+      "target_peg": 1.35,
+      "growth_floor_pct": 18,
+      "growth_cap_pct": 55,
+      "fair_pe_floor": 32,
+      "fair_pe_cap": 75,
+      "bootstrap_metric": "pe",
+      "bootstrap_fair": 66.1,
+      "bootstrap_asof": "2026-09-03"
+    },
+    "电网设备": {
+      "model": "growth_pe",
+      "boards": [
+        {
+          "kind": "industry",
+          "aliases": [
+            "电网设备",
+            "输配电气"
+          ]
+        },
+        {
+          "kind": "concept",
+          "aliases": [
+            "特高压"
+          ]
+        },
+        {
+          "kind": "concept",
+          "aliases": [
+            "智能电网"
+          ]
+        }
+      ],
+      "target_peg": 1.45,
+      "growth_floor_pct": 10,
+      "growth_cap_pct": 30,
+      "fair_pe_floor": 20,
+      "fair_pe_cap": 40,
+      "bootstrap_metric": "pe",
+      "bootstrap_fair": 33.68,
+      "bootstrap_asof": "2026-09-03"
+    },
+    "电力": {
+      "model": "utility",
+      "boards": [
+        {
+          "kind": "industry",
+          "aliases": [
+            "电力行业",
+            "电力"
+          ]
+        }
+      ],
+      "required_return": 0.09,
+      "terminal_growth": 0.03,
+      "fair_pe_floor": 12,
+      "fair_pe_cap": 22,
+      "fair_pb_floor": 0.9,
+      "fair_pb_cap": 2.2,
+      "bootstrap_metric": "pe",
+      "bootstrap_fair": 17.92,
+      "bootstrap_asof": "2026-09-03"
+    },
+    "储能电池": {
+      "model": "cyclical_growth",
+      "boards": [
+        {
+          "kind": "concept",
+          "aliases": [
+            "储能",
+            "储能概念"
+          ]
+        },
+        {
+          "kind": "industry",
+          "aliases": [
+            "电池"
+          ]
+        }
+      ],
+      "target_peg": 1.0,
+      "growth_floor_pct": 8,
+      "growth_cap_pct": 30,
+      "fair_pe_floor": 16,
+      "fair_pe_cap": 32,
+      "bootstrap_metric": "pe",
+      "bootstrap_fair": 24.45,
+      "bootstrap_asof": "2026-09-03"
+    },
+    "机器人": {
+      "model": "growth_pe",
+      "boards": [
+        {
+          "kind": "concept",
+          "aliases": [
+            "机器人概念",
+            "机器人"
+          ]
+        },
+        {
+          "kind": "concept",
+          "aliases": [
+            "人形机器人"
+          ]
+        },
+        {
+          "kind": "concept",
+          "aliases": [
+            "减速器",
+            "机器人执行器"
+          ]
+        }
+      ],
+      "target_peg": 1.3,
+      "growth_floor_pct": 15,
+      "growth_cap_pct": 45,
+      "fair_pe_floor": 28,
+      "fair_pe_cap": 60,
+      "bootstrap_metric": "pe",
+      "bootstrap_fair": 43.42,
+      "bootstrap_asof": "2026-09-03"
+    },
+    "创新药": {
+      "model": "innovation_drug",
+      "boards": [
+        {
+          "kind": "concept",
+          "aliases": [
+            "创新药"
+          ]
+        }
+      ],
+      "fair_ps_floor": 3.0,
+      "fair_ps_cap": 8.0,
+      "base_ps": 3.2,
+      "revenue_growth_ps_slope": 0.075,
+      "profitable_ps_bonus": 0.8,
+      "bootstrap_metric": "ps",
+      "bootstrap_fair": 3.12,
+      "bootstrap_asof": "2026-09-03"
+    },
+    "商业航天": {
+      "model": "early_growth_ps",
+      "boards": [
+        {
+          "kind": "concept",
+          "aliases": [
+            "商业航天"
+          ]
+        },
+        {
+          "kind": "concept",
+          "aliases": [
+            "卫星互联网"
+          ]
+        },
+        {
+          "kind": "concept",
+          "aliases": [
+            "卫星导航"
+          ]
+        }
+      ],
+      "fair_ps_floor": 2.5,
+      "fair_ps_cap": 7.0,
+      "base_ps": 3.0,
+      "revenue_growth_ps_slope": 0.06,
+      "bootstrap_metric": "ps",
+      "bootstrap_fair": null,
+      "bootstrap_asof": "model-first",
+      "note": "商业航天大量公司利润仍不稳定，首跑直接使用PS+收入增长模型；积累>=30个估值快照后再引入板块自身PS历史中位数。"
+    },
+    "电子化学品": {
+      "model": "growth_pe",
+      "boards": [
+        {
+          "kind": "industry",
+          "aliases": [
+            "电子化学品"
+          ]
+        },
+        {
+          "kind": "concept",
+          "aliases": [
+            "光刻胶"
+          ]
+        },
+        {
+          "kind": "concept",
+          "aliases": [
+            "半导体材料"
+          ]
+        }
+      ],
+      "target_peg": 1.35,
+      "growth_floor_pct": 12,
+      "growth_cap_pct": 40,
+      "fair_pe_floor": 28,
+      "fair_pe_cap": 60,
+      "bootstrap_metric": "pe",
+      "bootstrap_fair": 62.78,
+      "bootstrap_asof": "2026-09-02"
+    }
+  },
+  "stocks": {
+    "600863": {
+      "name": "华能蒙电",
+      "sector": "电力"
+    },
+    "600821": {
+      "name": "金开新能",
+      "sector": "电力"
+    },
+    "002128": {
+      "name": "电投能源",
+      "sector": "电力"
+    },
+    "601991": {
+      "name": "大唐发电",
+      "sector": "电力"
+    },
+    "300124": {
+      "name": "汇川技术",
+      "sector": "机器人"
+    },
+    "002028": {
+      "name": "思源电气",
+      "sector": "电网设备"
+    },
+    "688235": {
+      "name": "百济神州",
+      "sector": "创新药"
+    },
+    "688012": {
+      "name": "中微公司",
+      "sector": "半导体"
+    },
+    "600276": {
+      "name": "恒瑞医药",
+      "sector": "创新药"
+    },
+    "002371": {
+      "name": "北方华创",
+      "sector": "半导体"
+    },
+    "688041": {
+      "name": "海光信息",
+      "sector": "AI算力"
+    },
+    "300308": {
+      "name": "中际旭创",
+      "sector": "AI算力"
+    },
+    "600406": {
+      "name": "国电南瑞",
+      "sector": "电网设备"
+    },
+    "300760": {
+      "name": "迈瑞医疗",
+      "sector": "医疗器械"
+    },
+    "300014": {
+      "name": "亿纬锂能",
+      "sector": "储能电池"
+    },
+    "600995": {
+      "name": "南网储能",
+      "sector": "电力"
+    },
+    "300054": {
+      "name": "鼎龙股份",
+      "sector": "电子化学品"
+    },
+    "688008": {
+      "name": "澜起科技",
+      "sector": "半导体"
+    },
+    "605117": {
+      "name": "德业股份",
+      "sector": "储能电池"
+    }
+  }
+}

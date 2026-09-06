@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "a-share-mainline-scanner"
-version = "2.1.0"
+version = "2.1.1"
 description = "A股行业与概念板块主线/潜在主线扫描器"
 readme = "README.md"
 requires-python = ">=3.10"

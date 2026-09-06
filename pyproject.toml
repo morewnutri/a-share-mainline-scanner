@@ -26,6 +26,7 @@ dev = ["pytest>=8.0"]
 [project.scripts]
 mainline-scanner = "mainline_scanner.cli:main"
 mainline-backtest = "mainline_scanner.backtest:main"
+valuation-scanner = "mainline_scanner.valuation_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -33,4 +34,3 @@ where = ["src"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
-

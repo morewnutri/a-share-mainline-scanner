@@ -4,7 +4,8 @@
   "annual_report_date": "auto",
   "report_policy": {
     "min_financial_coverage": 0.8,
-    "note": "auto模式只使用已到法定披露截止日且横截面覆盖率达标的最新财报期；不达标自动回退。"
+    "note": "auto模式只使用已到法定披露截止日且横截面覆盖率达标的最新财报期；板块估值另要求至少75%的TTM及同比增长数据覆盖。",
+    "min_sector_data_coverage": 0.75
   },
   "history_min_points": 30,
   "sector_priority": [
@@ -70,7 +71,8 @@
       "fair_pe_cap": 60,
       "bootstrap_metric": "pe",
       "bootstrap_fair": 24.48,
-      "bootstrap_asof": "2026-09-03"
+      "bootstrap_asof": "2026-09-03",
+      "profit_growth_premium_cap_pct": 25
     },
     "半导体": {
       "model": "growth_pe",
@@ -96,7 +98,17 @@
       "fair_pe_cap": 75,
       "bootstrap_metric": "pe",
       "bootstrap_fair": 66.1,
-      "bootstrap_asof": "2026-09-03"
+      "bootstrap_asof": "2026-09-03",
+      "valuation_boards": [
+        {
+          "kind": "industry",
+          "aliases": [
+            "半导体"
+          ]
+        }
+      ],
+      "profit_growth_premium_cap_pct": 20,
+      "note": "估值只使用半导体行业成分，芯片/半导体概念仅用于股票归类；利润增速最多按营收增速+20pct计入可持续增长，避免周期/低基数把PEG合理PE抬得过高。"
     },
     "电网设备": {
       "model": "growth_pe",
@@ -128,7 +140,8 @@
       "fair_pe_cap": 40,
       "bootstrap_metric": "pe",
       "bootstrap_fair": 33.68,
-      "bootstrap_asof": "2026-09-03"
+      "bootstrap_asof": "2026-09-03",
+      "profit_growth_premium_cap_pct": 15
     },
     "电力": {
       "model": "utility",
@@ -175,7 +188,8 @@
       "fair_pe_cap": 32,
       "bootstrap_metric": "pe",
       "bootstrap_fair": 24.45,
-      "bootstrap_asof": "2026-09-03"
+      "bootstrap_asof": "2026-09-03",
+      "profit_growth_premium_cap_pct": 15
     },
     "机器人": {
       "model": "growth_pe",
@@ -208,7 +222,8 @@
       "fair_pe_cap": 60,
       "bootstrap_metric": "pe",
       "bootstrap_fair": 43.42,
-      "bootstrap_asof": "2026-09-03"
+      "bootstrap_asof": "2026-09-03",
+      "profit_growth_premium_cap_pct": 20
     },
     "创新药": {
       "model": "innovation_drug",
@@ -289,7 +304,8 @@
       "fair_pe_cap": 60,
       "bootstrap_metric": "pe",
       "bootstrap_fair": 62.78,
-      "bootstrap_asof": "2026-09-02"
+      "bootstrap_asof": "2026-09-02",
+      "profit_growth_premium_cap_pct": 20
     }
   },
   "stocks": {

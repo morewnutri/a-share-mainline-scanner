@@ -8,8 +8,17 @@
     "min_sector_data_coverage": 0.75
   },
   "history_min_points": 30,
+  "valuation_policy": {
+    "history_shrinkage_kappa": 60,
+    "min_profitable_mcap_coverage": 0.7,
+    "min_metric_mcap_coverage": 0.7,
+    "note": "历史权重使用有效样本量做log-space shrinkage；PE盈利市值覆盖不足70%时禁用并切换PB/PS。"
+  },
   "sector_priority": [
     "电力",
+    "公用事业",
+    "家电",
+    "医疗器械",
     "电网设备",
     "创新药",
     "电子化学品",
@@ -19,17 +28,6 @@
     "储能电池",
     "商业航天"
   ],
-  "fallback_stock_sector": "通用成长",
-  "fallback_stock_model": {
-    "model": "growth_pe",
-    "target_peg": 1.45,
-    "growth_floor_pct": 8,
-    "growth_cap_pct": 25,
-    "fair_pe_floor": 20,
-    "fair_pe_cap": 42,
-    "bootstrap_metric": "pe",
-    "bootstrap_fair": null
-  },
   "sectors": {
     "AI算力": {
       "model": "growth_pe",
@@ -72,7 +70,13 @@
       "bootstrap_metric": "pe",
       "bootstrap_fair": 24.48,
       "bootstrap_asof": "2026-09-03",
-      "profit_growth_premium_cap_pct": 25
+      "profit_growth_premium_cap_pct": 25,
+      "base_margin": 0.32,
+      "base_uncertainty": 0.24,
+      "valuation_boards": [
+        {"kind": "concept", "aliases": ["算力概念", "算力", "算力租赁"]},
+        {"kind": "concept", "aliases": ["CPO概念", "CPO"]}
+      ]
     },
     "半导体": {
       "model": "growth_pe",
@@ -141,7 +145,13 @@
       "bootstrap_metric": "pe",
       "bootstrap_fair": 33.68,
       "bootstrap_asof": "2026-09-03",
-      "profit_growth_premium_cap_pct": 15
+      "profit_growth_premium_cap_pct": 15,
+      "base_margin": 0.26,
+      "base_uncertainty": 0.20,
+      "cycle_penalty": 0.04,
+      "valuation_boards": [
+        {"kind": "industry", "aliases": ["电池"]}
+      ]
     },
     "电力": {
       "model": "utility",
@@ -223,7 +233,12 @@
       "bootstrap_metric": "pe",
       "bootstrap_fair": 43.42,
       "bootstrap_asof": "2026-09-03",
-      "profit_growth_premium_cap_pct": 20
+      "profit_growth_premium_cap_pct": 20,
+      "base_margin": 0.32,
+      "base_uncertainty": 0.25,
+      "valuation_boards": [
+        {"kind": "concept", "aliases": ["机器人概念", "机器人"]}
+      ]
     },
     "创新药": {
       "model": "innovation_drug",
@@ -242,7 +257,12 @@
       "profitable_ps_bonus": 0.8,
       "bootstrap_metric": "ps",
       "bootstrap_fair": 3.12,
-      "bootstrap_asof": "2026-09-03"
+      "bootstrap_asof": "2026-09-03",
+      "base_margin": 0.38,
+      "base_uncertainty": 0.30,
+      "valuation_boards": [
+        {"kind": "concept", "aliases": ["创新药"]}
+      ]
     },
     "商业航天": {
       "model": "early_growth_ps",
@@ -273,6 +293,11 @@
       "bootstrap_metric": "ps",
       "bootstrap_fair": null,
       "bootstrap_asof": "model-first",
+      "base_margin": 0.36,
+      "base_uncertainty": 0.28,
+      "valuation_boards": [
+        {"kind": "concept", "aliases": ["商业航天"]}
+      ],
       "note": "商业航天大量公司利润仍不稳定，首跑直接使用PS+收入增长模型；积累>=30个估值快照后再引入板块自身PS历史中位数。"
     },
     "电子化学品": {
@@ -305,12 +330,66 @@
       "bootstrap_metric": "pe",
       "bootstrap_fair": 62.78,
       "bootstrap_asof": "2026-09-02",
-      "profit_growth_premium_cap_pct": 20
+      "profit_growth_premium_cap_pct": 20,
+      "base_margin": 0.27,
+      "base_uncertainty": 0.21,
+      "valuation_boards": [
+        {"kind": "industry", "aliases": ["电子化学品"]}
+      ]
+    },
+    "医疗器械": {
+      "model": "quality_growth",
+      "boards": [{"kind": "industry", "aliases": ["医疗器械"]}],
+      "valuation_boards": [{"kind": "industry", "aliases": ["医疗器械"]}],
+      "target_peg": 1.55,
+      "growth_floor_pct": 8,
+      "growth_cap_pct": 30,
+      "fair_pe_floor": 22,
+      "fair_pe_cap": 45,
+      "bootstrap_metric": "pe",
+      "bootstrap_fair": null,
+      "model_weights": {"pe": 0.5, "ocf_yield": 0.3, "ps": 0.2},
+      "target_ocf_yield": 0.045,
+      "base_margin": 0.20,
+      "base_uncertainty": 0.16
+    },
+    "家电": {
+      "model": "mature_consumer",
+      "boards": [{"kind": "industry", "aliases": ["家电行业", "家用电器"]}],
+      "valuation_boards": [{"kind": "industry", "aliases": ["家电行业", "家用电器"]}],
+      "target_peg": 1.35,
+      "growth_floor_pct": 5,
+      "growth_cap_pct": 20,
+      "fair_pe_floor": 12,
+      "fair_pe_cap": 28,
+      "bootstrap_metric": "pe",
+      "bootstrap_fair": null,
+      "model_weights": {"ocf_yield": 0.4, "pe": 0.4, "pb": 0.2},
+      "target_ocf_yield": 0.06,
+      "base_margin": 0.16,
+      "base_uncertainty": 0.13
+    },
+    "公用事业": {
+      "model": "utility",
+      "boards": [{"kind": "industry", "aliases": ["公用事业", "电力行业", "电力"]}],
+      "valuation_boards": [{"kind": "industry", "aliases": ["公用事业", "电力行业", "电力"]}],
+      "required_return": 0.09,
+      "terminal_growth": 0.03,
+      "fair_pe_floor": 11,
+      "fair_pe_cap": 22,
+      "fair_pb_floor": 0.85,
+      "fair_pb_cap": 2.2,
+      "bootstrap_metric": "pe",
+      "bootstrap_fair": null,
+      "model_weights": {"pb": 0.4, "pe": 0.3, "ocf_yield": 0.3},
+      "target_ocf_yield": 0.07,
+      "base_margin": 0.13,
+      "base_uncertainty": 0.11
     }
   },
   "stocks": {
     "600863": {
-      "name": "华能蒙电",
+      "name": "内蒙华电",
       "sector": "电力"
     },
     "600821": {
@@ -385,13 +464,13 @@
       "name": "德业股份",
       "sector": "储能电池"
     },
-    "000333":{
-      "name": , "美的集团",
+    "000333": {
+      "name": "美的集团",
       "sector": "家电"
     },
-    "601985":{
-      "name": , "中国核电",
+    "601985": {
+      "name": "中国核电",
       "sector": "公用事业"
-    },
+    }
   }
 }

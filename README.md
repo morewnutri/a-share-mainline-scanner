@@ -143,6 +143,37 @@ mainline-backtest --snapshot-dir data/snapshots --output-dir reports/backtest
 - `数据完整性审计.xlsx`
 - `遗漏板块明细.csv`
 
+## 风险约束估值与仓位区间
+
+估值扫描器现在按以下链路输出可审计结果：
+
+```text
+TTM来源与置信度 → 数据质量门槛 → 模型族公允价 → point-in-time残差
+→ Quantile/MAD交易带 → 动态安全边际 → 主线生命周期仓位门槛
+```
+
+运行：
+
+```powershell
+valuation-scanner --no-prompt
+
+# 指定主线扫描结果；默认即为 reports/latest/板块完整评分.csv
+valuation-scanner --mainline-csv reports/latest/板块完整评分.csv --no-prompt
+```
+
+关键约束：
+
+- 配置加载时校验 JSON、股票代码、名称、行业和模型引用，未知模型返回 `MODEL_UNRESOLVED / NO_TRADE`，不再静默套用通用 PE。
+- TTM 明确区分 `EXACT_TTM`、`ANNUALIZED_Q1/H1/Q3`、`QUOTE_PROVIDER_PE` 和 `MISSING`；数据越弱，公允区间和安全边际越大。
+- 板块同时输出 `aggregate_pe`、`positive_profit_pe`、`profitable_mcap_coverage`、`loss_mcap_share`，并分别输出 PE/PB/PS 市值覆盖率。盈利市值覆盖不足 70% 时 PE 被禁用。
+- 个股公允价使用模型隐含价格的加权几何平均；历史倍数按有效样本量进行 log-space shrinkage，不再使用固定 60/40 权重。
+- 自建 `stock_valuation_snapshots.csv` 保存当时可见的公允价和估值残差；按实际交易日排序、去重。历史不足时交易带明确标记为 `MODEL_PRIOR_BANDS`。
+- `buy_price` 同时受历史低分位和绝对安全价值约束；最终给出目标仓位、主线阶段、动作和 `action_reason`，而不是只有 BUY/SELL 标签。
+
+主要个股输出字段包括公允价上下沿/中心、深度建仓/建仓/减仓/退出价、估值分位、Robust-Z、动态安全边际、数据质量、TTM 方法、历史状态、现金转化、毛利率/ROE 趋势、主线阶段、目标仓位和最终动作。历史接口失败与配置名称/市场名称不一致会进入 `估值风险告警.csv` 和 Excel 告警工作表。
+
+> OCF 模型明确标记为 `OCF_YIELD_PROXY`。免费源目前没有稳定、完整的资本开支口径，因此它不是伪装成精确 FCFF 的现金流模型。
+
 ## Google Colab
 
 ```python

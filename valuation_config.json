@@ -1,8 +1,34 @@
 {
-  "report_date": "20260630",
-  "prior_report_date": "20250630",
-  "annual_report_date": "20251231",
+  "report_date": "auto",
+  "prior_report_date": "auto",
+  "annual_report_date": "auto",
+  "report_policy": {
+    "min_financial_coverage": 0.8,
+    "note": "auto模式只使用已到法定披露截止日且横截面覆盖率达标的最新财报期；不达标自动回退。"
+  },
   "history_min_points": 30,
+  "sector_priority": [
+    "电力",
+    "电网设备",
+    "创新药",
+    "电子化学品",
+    "半导体",
+    "AI算力",
+    "机器人",
+    "储能电池",
+    "商业航天"
+  ],
+  "fallback_stock_sector": "通用成长",
+  "fallback_stock_model": {
+    "model": "growth_pe",
+    "target_peg": 1.45,
+    "growth_floor_pct": 8,
+    "growth_cap_pct": 25,
+    "fair_pe_floor": 20,
+    "fair_pe_cap": 42,
+    "bootstrap_metric": "pe",
+    "bootstrap_fair": null
+  },
   "sectors": {
     "AI算力": {
       "model": "growth_pe",

@@ -251,8 +251,8 @@ class ValuationDataProvider:
         raw = self._cached_frame(f"performance_{date}", load, timedelta(hours=18)).copy()
         code_col = _pick(raw.columns, "股票代码", "代码")
         name_col = _pick(raw.columns, "股票简称", "名称")
-        rev_col = _pick(raw.columns, "营业收入-营业收入", "营业收入")
-        rev_yoy_col = _pick(raw.columns, "营业收入-同比增长", "营业收入同比增长")
+        rev_col = _pick(raw.columns, "营业总收入-营业总收入", "营业总收入", "营业收入-营业收入", "营业收入")
+        rev_yoy_col = _pick(raw.columns, "营业总收入-同比增长", "营业总收入同比增长", "营业收入-同比增长", "营业收入同比增长")
         profit_col = _pick(raw.columns, "净利润-净利润", "归属于母公司所有者的净利润", "净利润")
         profit_yoy_col = _pick(raw.columns, "净利润-同比增长", "净利润同比增长")
         roe_col = _pick(raw.columns, "净资产收益率")
@@ -346,15 +346,17 @@ class ValuationDataProvider:
             "board": resolved.board_name,
         }).dropna(subset=["code"]).drop_duplicates("code")
 
-    def sector_universe(self, sector_cfg: dict[str, Any]) -> tuple[pd.DataFrame, list[BoardResolved]]:
-        cache_key = json.dumps(sector_cfg.get("boards", []), ensure_ascii=False, sort_keys=True)
+    def sector_universe(self, sector_cfg: dict[str, Any], purpose: str = "inference") -> tuple[pd.DataFrame, list[BoardResolved]]:
+        board_key = "valuation_boards" if purpose == "valuation" and sector_cfg.get("valuation_boards") else "boards"
+        board_specs = sector_cfg.get(board_key, [])
+        cache_key = purpose + ":" + json.dumps(board_specs, ensure_ascii=False, sort_keys=True)
         if cache_key in self._sector_universe_memory:
             u, r = self._sector_universe_memory[cache_key]
             return u.copy(), list(r)
 
         chunks: list[pd.DataFrame] = []
         resolved_all: list[BoardResolved] = []
-        for spec in sector_cfg.get("boards", []):
+        for spec in board_specs:
             resolved = self.resolve_board(spec["kind"], spec.get("aliases", []))
             if not resolved:
                 continue
@@ -380,7 +382,7 @@ class ValuationDataProvider:
         candidates: list[tuple[int, int, str]] = []
         for sector_name, sector_cfg in config.get("sectors", {}).items():
             try:
-                universe, _ = self.sector_universe(sector_cfg)
+                universe, _ = self.sector_universe(sector_cfg, purpose="inference")
             except Exception:
                 continue
             hit = universe[universe["code"] == str(code)]
@@ -446,20 +448,33 @@ class ValuationEngine:
         roe = float(np.nanmedian(x["roe_h1_pct_cur"])) if x["roe_h1_pct_cur"].notna().any() else np.nan
         gross = float(np.nanmedian(x["gross_margin_pct_cur"])) if x["gross_margin_pct_cur"].notna().any() else np.nan
         profitable_coverage = pos["market_cap"].sum() / total_mv if total_mv > 0 else np.nan
-        data_coverage = x["ttm_revenue"].notna().mean() if len(x) else 0
+        ttm_revenue_coverage = x["ttm_revenue"].notna().mean() if len(x) else 0.0
+        ttm_profit_coverage = x["ttm_profit"].notna().mean() if len(x) else 0.0
+        revenue_growth_coverage = len(both_rev) / len(x) if len(x) else 0.0
+        profit_growth_coverage = len(both_p) / len(x) if len(x) else 0.0
+        data_coverage = min(ttm_revenue_coverage, ttm_profit_coverage, revenue_growth_coverage, profit_growth_coverage)
         return {
             "constituents": len(x), "market_cap": total_mv, "pe": pe, "pb": pb, "ps": ps,
             "revenue_growth": rev_growth, "profit_growth": profit_growth,
             "roe_h1_pct": roe, "gross_margin_pct": gross,
             "profitable_mcap_coverage": profitable_coverage, "data_coverage": data_coverage,
+            "ttm_revenue_coverage": ttm_revenue_coverage, "ttm_profit_coverage": ttm_profit_coverage,
+            "revenue_growth_coverage": revenue_growth_coverage, "profit_growth_coverage": profit_growth_coverage,
         }
 
     @staticmethod
-    def _normalized_growth_pct(m: dict[str, float]) -> float:
+    def _normalized_growth_pct(m: dict[str, float], c: dict[str, Any] | None = None) -> float:
         rg = m.get("revenue_growth", np.nan) * 100
         pg = m.get("profit_growth", np.nan) * 100
+        c = c or {}
         if np.isfinite(pg) and np.isfinite(rg):
-            # Profit is more important, but cap extreme one-offs such as base-effect reversals.
+            # Current-period profit can explode because of a low base, loss-to-profit reversals,
+            # memory/commodity cycles or one-off gains. Do not capitalize that full jump into
+            # a perpetual PEG multiple. Limit sustainable profit growth to a configurable
+            # premium over revenue growth before weighting the two.
+            premium_cap = c.get("profit_growth_premium_cap_pct")
+            if premium_cap is not None and np.isfinite(float(premium_cap)):
+                pg = min(pg, rg + float(premium_cap))
             return 0.65 * _clip(pg, -30, 80) + 0.35 * _clip(rg, -30, 60)
         if np.isfinite(pg):
             return _clip(pg, -30, 80)
@@ -479,7 +494,7 @@ class ValuationEngine:
 
     def _model_fair(self, name: str, c: dict[str, Any], m: dict[str, float]) -> tuple[dict[str, float], str]:
         model = c["model"]
-        g = self._normalized_growth_pct(m)
+        g = self._normalized_growth_pct(m, c)
         fair: dict[str, float] = {"pe": np.nan, "pb": np.nan, "ps": np.nan}
         note = ""
 
@@ -517,10 +532,23 @@ class ValuationEngine:
         return fair, note
 
     def evaluate_sector(self, name: str, c: dict[str, Any]) -> dict[str, Any]:
-        u, resolved = self.p.sector_universe(c)
+        u, resolved = self.p.sector_universe(c, purpose="valuation")
         if u.empty:
             return {"entity": name, "type": "sector", "error": "未解析到板块成分"}
         m = self._aggregate(u)
+        primary = c.get("bootstrap_metric", "pe")
+        min_cov = float(c.get("min_data_coverage", self.cfg.get("report_policy", {}).get("min_sector_data_coverage", 0.75)))
+        growth_required = c.get("model") in {"growth_pe", "cyclical_growth", "innovation_drug", "early_growth_ps"}
+        missing_growth = growth_required and (not np.isfinite(m.get("revenue_growth", np.nan)) or not np.isfinite(m.get("profit_growth", np.nan)))
+        if m.get("data_coverage", 0.0) < min_cov or missing_growth or not np.isfinite(m.get(primary, np.nan)):
+            resolved_names = ";".join(f"{r.kind}:{r.board_name}" for r in resolved)
+            return {
+                "entity": name, "type": "sector", "model": c["model"], "resolved_boards": resolved_names,
+                **m, "primary_metric": primary, "current_primary": m.get(primary, np.nan),
+                "fair_primary": np.nan, "fair_source": "数据覆盖不足，拒绝估值", "value_deviation": np.nan,
+                "valuation_label": "数据不足", "model_note": f"coverage={m.get('data_coverage', 0.0):.1%}, min={min_cov:.1%}",
+            }
+
         fair_model, model_note = self._model_fair(name, c, m)
 
         primary = c.get("bootstrap_metric", "pe")

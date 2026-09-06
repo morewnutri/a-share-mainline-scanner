@@ -4,9 +4,10 @@ import json
 import math
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -84,6 +85,56 @@ class BoardResolved:
     board_code: str
 
 
+@dataclass(frozen=True)
+class ReportSelection:
+    current: str
+    prior: str
+    annual: str
+    current_coverage: float
+    prior_coverage: float
+    annual_coverage: float
+    source: str
+
+
+def annualization_factor(report_date: str) -> float:
+    """Convert cumulative interim figures/ROE to an approximate annual rate."""
+    suffix = str(report_date)[-4:]
+    return {"0331": 4.0, "0630": 2.0, "0930": 4.0 / 3.0, "1231": 1.0}.get(suffix, 1.0)
+
+
+def report_period_triplet(current: str) -> tuple[str, str, str]:
+    current = str(current)
+    if not re.fullmatch(r"\d{8}", current):
+        raise ValueError(f"非法财报日期: {current}")
+    year = int(current[:4])
+    suffix = current[4:]
+    if suffix not in {"0331", "0630", "0930", "1231"}:
+        raise ValueError(f"不支持的财报期: {current}")
+    return current, f"{year - 1}{suffix}", f"{year - 1}1231"
+
+
+def completed_report_candidates(today: date | None = None, limit: int = 8) -> list[str]:
+    """Newest broadly-complete A-share interim periods, newest first.
+
+    Q1 is treated as complete from Apr-30, H1 from Aug-31, Q3 from Oct-31.
+    Annual reports are used as the TTM base, not as the cross-sectional current
+    period, because Q1 becomes complete at the same statutory cutoff.
+    """
+    if today is None:
+        try:
+            today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+        except Exception:  # pragma: no cover
+            today = date.today()
+    rows: list[tuple[date, str]] = []
+    for year in range(today.year - 4, today.year + 1):
+        rows.extend([
+            (date(year, 4, 30), f"{year}0331"),
+            (date(year, 8, 31), f"{year}0630"),
+            (date(year, 10, 31), f"{year}0930"),
+        ])
+    return [period for cutoff, period in sorted(rows, reverse=True) if cutoff <= today][:limit]
+
+
 class ValuationDataProvider:
     """
     Valuation data layer designed to sit on top of the existing repository's
@@ -100,17 +151,49 @@ class ValuationDataProvider:
         self.ttl = timedelta(hours=ttl_hours)
         self.base = EastmoneyAkshareProvider(cache_dir=self.cache_dir / "market", refresh=refresh)
         self.ak = self.base.ak
+        # --refresh means "fetch once from source in this process", not "refetch
+        # every time the same logical dataset is requested". This avoids duplicate
+        # network calls during report-date validation, valuation and sector inference.
+        self._memory_frames: dict[str, pd.DataFrame] = {}
+        self._fetch_audit: dict[str, dict[str, Any]] = {}
+        self._sector_universe_memory: dict[str, tuple[pd.DataFrame, list[BoardResolved]]] = {}
 
     def _cached_frame(self, key: str, loader, ttl: timedelta | None = None) -> pd.DataFrame:
+        if key in self._memory_frames:
+            return self._memory_frames[key].copy()
+
         p = self.cache_dir / f"{key}.csv"
         t = ttl or self.ttl
+        cache_used = False
+        fetched_at = datetime.now()
         if not self.refresh and p.exists() and datetime.now() - datetime.fromtimestamp(p.stat().st_mtime) <= t:
-            return pd.read_csv(p, dtype={"代码": str, "股票代码": str}, encoding="utf-8-sig")
-        df = loader()
-        if not isinstance(df, pd.DataFrame):
-            raise RuntimeError(f"{key} 数据源未返回 DataFrame")
-        df.to_csv(p, index=False, encoding="utf-8-sig")
-        return df
+            df = pd.read_csv(p, dtype={"代码": str, "股票代码": str}, encoding="utf-8-sig")
+            cache_used = True
+            fetched_at = datetime.fromtimestamp(p.stat().st_mtime)
+        else:
+            df = loader()
+            if not isinstance(df, pd.DataFrame):
+                raise RuntimeError(f"{key} 数据源未返回 DataFrame")
+            p.parent.mkdir(parents=True, exist_ok=True)
+            df.to_csv(p, index=False, encoding="utf-8-sig")
+            fetched_at = datetime.now()
+
+        self._memory_frames[key] = df.copy()
+        self._fetch_audit[key] = {
+            "dataset": key,
+            "rows": len(df),
+            "cache_used": cache_used,
+            "refresh_requested": self.refresh,
+            "fetched_at": fetched_at.isoformat(timespec="seconds"),
+            "cache_path": str(p),
+            "ttl_minutes": round(t.total_seconds() / 60, 1),
+        }
+        return df.copy()
+
+    def freshness_frame(self) -> pd.DataFrame:
+        if not self._fetch_audit:
+            return pd.DataFrame(columns=["dataset", "rows", "cache_used", "refresh_requested", "fetched_at", "cache_path", "ttl_minutes"])
+        return pd.DataFrame(self._fetch_audit.values()).sort_values("dataset").reset_index(drop=True)
 
     def spot(self) -> pd.DataFrame:
         def load_ak() -> pd.DataFrame:
@@ -197,14 +280,19 @@ class ValuationDataProvider:
         x = cur.merge(pri, on="code", how="outer").merge(ann, on="code", how="outer")
         x["ttm_revenue"] = x["revenue_ann"] + x["revenue_cur"] - x["revenue_pri"]
         x["ttm_profit"] = x["net_profit_ann"] + x["net_profit_cur"] - x["net_profit_pri"]
-        # Safe fallback for missing annual results: annualize H1 and lower confidence later.
-        x["ttm_revenue"] = x["ttm_revenue"].where(x["ttm_revenue"].notna(), x["revenue_cur"] * 2)
-        x["ttm_profit"] = x["ttm_profit"].where(x["ttm_profit"].notna(), x["net_profit_cur"] * 2)
+        # Safe fallback for missing annual/prior data. The annualisation factor
+        # must depend on Q1/H1/Q3; multiplying every interim period by 2 would
+        # materially misstate Q1 and Q3 TTM values.
+        factor = annualization_factor(current)
+        x["ttm_revenue"] = x["ttm_revenue"].where(x["ttm_revenue"].notna(), x["revenue_cur"] * factor)
+        x["ttm_profit"] = x["ttm_profit"].where(x["ttm_profit"].notna(), x["net_profit_cur"] * factor)
         return x
 
     def board_catalog(self, kind: str) -> pd.DataFrame:
-        raw = self.base._direct_universe(kind).copy()
-        return raw[["板块名称", "板块代码"]].drop_duplicates()
+        def load() -> pd.DataFrame:
+            raw = self.base._direct_universe(kind).copy()
+            return raw[["板块名称", "板块代码"]].drop_duplicates()
+        return self._cached_frame(f"board_catalog_{kind}", load, timedelta(minutes=30)).copy()
 
     def resolve_board(self, kind: str, aliases: list[str]) -> BoardResolved | None:
         cat = self.board_catalog(kind)
@@ -259,6 +347,11 @@ class ValuationDataProvider:
         }).dropna(subset=["code"]).drop_duplicates("code")
 
     def sector_universe(self, sector_cfg: dict[str, Any]) -> tuple[pd.DataFrame, list[BoardResolved]]:
+        cache_key = json.dumps(sector_cfg.get("boards", []), ensure_ascii=False, sort_keys=True)
+        if cache_key in self._sector_universe_memory:
+            u, r = self._sector_universe_memory[cache_key]
+            return u.copy(), list(r)
+
         chunks: list[pd.DataFrame] = []
         resolved_all: list[BoardResolved] = []
         for spec in sector_cfg.get("boards", []):
@@ -270,11 +363,36 @@ class ValuationDataProvider:
             c["source_kind"] = resolved.kind
             chunks.append(c)
         if not chunks:
-            return pd.DataFrame(columns=["code", "name"]), resolved_all
+            result = pd.DataFrame(columns=["code", "name", "board_hits"])
+            self._sector_universe_memory[cache_key] = (result.copy(), resolved_all)
+            return result, resolved_all
         allc = pd.concat(chunks, ignore_index=True)
         board_count = allc.groupby("code")["board"].nunique().rename("board_hits")
         names = allc.groupby("code")["name"].first()
-        return pd.concat([names, board_count], axis=1).reset_index(), resolved_all
+        result = pd.concat([names, board_count], axis=1).reset_index()
+        self._sector_universe_memory[cache_key] = (result.copy(), resolved_all)
+        return result, resolved_all
+
+    def infer_stock_sector(self, code: str, config: dict[str, Any]) -> str:
+        """Infer the best configured valuation sector from board membership."""
+        priority = list(config.get("sector_priority", config.get("sectors", {}).keys()))
+        priority_rank = {name: i for i, name in enumerate(priority)}
+        candidates: list[tuple[int, int, str]] = []
+        for sector_name, sector_cfg in config.get("sectors", {}).items():
+            try:
+                universe, _ = self.sector_universe(sector_cfg)
+            except Exception:
+                continue
+            hit = universe[universe["code"] == str(code)]
+            if hit.empty:
+                continue
+            raw_hits = pd.to_numeric(hit.iloc[0].get("board_hits", 1), errors="coerce")
+            board_hits = int(raw_hits) if pd.notna(raw_hits) and float(raw_hits) > 0 else 1
+            candidates.append((-board_hits, priority_rank.get(sector_name, 999), sector_name))
+        if not candidates:
+            return str(config.get("fallback_stock_sector", "通用成长"))
+        candidates.sort()
+        return candidates[0][2]
 
     def stock_history_indicator(self, code: str) -> pd.DataFrame:
         """Optional AKShare LeGu index. Failure is non-fatal."""
@@ -292,8 +410,10 @@ class ValuationEngine:
         self.state_dir = Path(state_dir)
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.spot = self.p.spot()
+        self.report_date = str(config["report_date"])
+        self.roe_annualization_factor = annualization_factor(self.report_date)
         self.fund = self.p.fundamentals_ttm(
-            config["report_date"], config["prior_report_date"], config["annual_report_date"]
+            self.report_date, config["prior_report_date"], config["annual_report_date"]
         )
         self.master = self.spot.merge(self.fund, on="code", how="left")
         self.master["pe_ttm_calc"] = np.where(
@@ -317,7 +437,7 @@ class ValuationEngine:
         book = (pb_x["market_cap"] / pb_x["pb"]).sum()
         pb = pb_x["market_cap"].sum() / book if book > 0 else np.nan
 
-        # Aggregate H1 growth from actual current/prior numbers, avoiding arithmetic averaging of percentages.
+        # Aggregate current-period growth from actual current/prior numbers, avoiding arithmetic averaging of percentages.
         both_rev = x[(x["revenue_cur"] > 0) & (x["revenue_pri"] > 0)]
         rev_growth = both_rev["revenue_cur"].sum() / both_rev["revenue_pri"].sum() - 1 if len(both_rev) else np.nan
         both_p = x[x["net_profit_pri"].notna() & x["net_profit_cur"].notna()]
@@ -374,7 +494,7 @@ class ValuationEngine:
             note = f"PEG/正常化增长模型(g={g_used:.1f}%)"
 
         elif model == "utility":
-            roe_annual = m.get("roe_h1_pct", np.nan) * 2 / 100
+            roe_annual = m.get("roe_h1_pct", np.nan) * self.roe_annualization_factor / 100
             k = float(c.get("required_return", 0.09))
             tg = float(c.get("terminal_growth", 0.03))
             if np.isfinite(roe_annual) and roe_annual > tg and k > tg:
@@ -464,13 +584,19 @@ class ValuationEngine:
         r = x.iloc[0]
         sector = info.get("sector")
         c = self.cfg["sectors"].get(sector)
-        # Medical-device / unconfigured fallback: mature growth-quality model.
         if c is None:
-            c = {
+            c = dict(self.cfg.get("fallback_stock_model", {
                 "model": "growth_pe", "target_peg": 1.45, "growth_floor_pct": 8, "growth_cap_pct": 25,
                 "fair_pe_floor": 20, "fair_pe_cap": 42, "bootstrap_metric": "pe", "bootstrap_fair": np.nan
-            }
-        pe_value = float(r["pe_ttm_calc"]) if np.isfinite(r["pe_ttm_calc"]) else float(r["pe_dynamic"])
+            }))
+        if np.isfinite(r["pe_ttm_calc"]) and float(r["pe_ttm_calc"]) > 0:
+            pe_value = float(r["pe_ttm_calc"])
+        elif pd.isna(r["ttm_profit"]) and np.isfinite(r["pe_dynamic"]) and float(r["pe_dynamic"]) > 0:
+            # Only use the quote-provider PE when TTM profit itself is missing.
+            # A known loss must never be converted into a seemingly cheap PE.
+            pe_value = float(r["pe_dynamic"])
+        else:
+            pe_value = np.nan
         m = {
             "pe": pe_value,
             "pb": float(r["pb"]), "ps": float(r["ps_ttm_calc"]),
@@ -528,25 +654,113 @@ class ValuationEngine:
             "revenue_growth": m["revenue_growth"], "profit_growth": m["profit_growth"], "roe_h1_pct": m["roe_h1_pct"],
             "primary_metric": primary, "current_primary": current, "fair_primary": fair,
             "fair_source": fair_source, "value_deviation": deviation, "valuation_label": valuation_label(deviation),
-            "growth_gate": gate, "model_note": model_note,
+            "growth_gate": gate, "model_note": model_note, "stock_source": info.get("source", "config"),
             "fair_pe": fair_by_metric.get("pe", fair if primary == "pe" else np.nan),
             "fair_pb": fair_by_metric.get("pb", fair if primary == "pb" else np.nan),
         }
 
     def save_snapshots(self, sector_rows: list[dict[str, Any]]) -> Path:
+        """Persist one valuation observation per sector per Shanghai calendar day.
+
+        Re-running a notebook many times on the same day must not manufacture
+        enough "history" to satisfy history_min_points. The latest run of the
+        day replaces the previous same-day observation.
+        """
         p = self.state_dir / "valuation_snapshots.csv"
-        now = datetime.now().isoformat(timespec="seconds")
+        try:
+            now_dt = datetime.now(ZoneInfo("Asia/Shanghai"))
+        except Exception:  # pragma: no cover
+            now_dt = datetime.now().astimezone()
+        now = now_dt.isoformat(timespec="seconds")
+        day = now_dt.date().isoformat()
         rows = []
         for r in sector_rows:
             if r.get("error"):
                 continue
-            rows.append({"timestamp": now, "entity": r["entity"], "pe": r.get("pe"), "pb": r.get("pb"), "ps": r.get("ps")})
+            rows.append({
+                "timestamp": now, "date": day, "entity": r["entity"],
+                "pe": r.get("pe"), "pb": r.get("pb"), "ps": r.get("ps")
+            })
         new = pd.DataFrame(rows)
         if p.exists():
             old = pd.read_csv(p)
+            if "date" not in old.columns and "timestamp" in old.columns:
+                old["date"] = pd.to_datetime(old["timestamp"], errors="coerce").dt.date.astype("string")
+            if len(new):
+                entities = set(new["entity"].astype(str))
+                old = old[~((old["date"].astype(str) == day) & old["entity"].astype(str).isin(entities))]
             new = pd.concat([old, new], ignore_index=True)
         new.to_csv(p, index=False, encoding="utf-8-sig")
         return p
+
+
+def _coverage(reference_codes: set[str], available_codes: set[str]) -> float:
+    if not reference_codes:
+        return 0.0
+    return len(reference_codes & available_codes) / len(reference_codes)
+
+
+def select_report_periods(
+    provider: ValuationDataProvider,
+    config: dict[str, Any],
+    today: date | None = None,
+) -> ReportSelection:
+    """Resolve the latest sufficiently complete report period.
+
+    Explicit dates in config are respected. With report_date="auto", the
+    newest completed interim period is tried first and the function falls back
+    if cross-sectional coverage is below the configured threshold.
+    """
+    min_cov = float(config.get("report_policy", {}).get("min_financial_coverage", 0.80))
+    spot = provider.spot()
+    spot_codes = set(spot["code"].dropna().astype(str))
+
+    explicit = str(config.get("report_date", "auto"))
+    candidates = [explicit] if explicit.lower() != "auto" else completed_report_candidates(today=today)
+    errors: list[str] = []
+
+    for current in candidates:
+        try:
+            _, auto_prior, auto_annual = report_period_triplet(current)
+            prior_cfg = str(config.get("prior_report_date", "auto"))
+            annual_cfg = str(config.get("annual_report_date", "auto"))
+            prior = prior_cfg if explicit.lower() != "auto" and prior_cfg.lower() != "auto" else auto_prior
+            annual = annual_cfg if explicit.lower() != "auto" and annual_cfg.lower() != "auto" else auto_annual
+
+            cur = provider.performance(current)
+            pri = provider.performance(prior)
+            ann = provider.performance(annual)
+            cur_codes = set(cur["code"].dropna().astype(str))
+            pri_codes = set(pri["code"].dropna().astype(str))
+            ann_codes = set(ann["code"].dropna().astype(str))
+            current_cov = _coverage(spot_codes, cur_codes)
+            # Compare old periods against current reporters rather than today's
+            # whole market, so recent IPOs do not falsely fail the audit.
+            prior_cov = _coverage(cur_codes, pri_codes)
+            annual_cov = _coverage(cur_codes, ann_codes)
+            if explicit.lower() != "auto" or (current_cov >= min_cov and prior_cov >= min_cov and annual_cov >= min_cov):
+                return ReportSelection(
+                    current=current, prior=prior, annual=annual,
+                    current_coverage=current_cov, prior_coverage=prior_cov, annual_coverage=annual_cov,
+                    source="config" if explicit.lower() != "auto" else "auto-latest-complete",
+                )
+            errors.append(
+                f"{current}: current={current_cov:.1%}, prior={prior_cov:.1%}, annual={annual_cov:.1%}"
+            )
+        except Exception as exc:
+            errors.append(f"{current}: {type(exc).__name__}: {exc}")
+
+    raise RuntimeError(
+        "无法找到覆盖率达标的财报期。尝试结果: " + " | ".join(errors)
+    )
+
+
+def apply_report_selection(config: dict[str, Any], selection: ReportSelection) -> dict[str, Any]:
+    cfg = json.loads(json.dumps(config, ensure_ascii=False))
+    cfg["report_date"] = selection.current
+    cfg["prior_report_date"] = selection.prior
+    cfg["annual_report_date"] = selection.annual
+    return cfg
 
 
 def load_config(path: Path) -> dict[str, Any]:

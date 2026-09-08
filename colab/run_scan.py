@@ -12,14 +12,12 @@ WORKERS = 2
 LOOKBACK_CALENDAR_DAYS = 75
 REFRESH = False
 SCAN_ALL_SOURCE_BOARDS = True
-USE_GOOGLE_DRIVE_CACHE = True
 BAOSTOCK_MODE = "off"  # industry 较慢；all 还会合成概念，首次运行可能很慢
 # ====================
 
 
 def main() -> None:
     try:
-        from google.colab import drive
         from IPython.display import Image, Markdown, display
     except ImportError as exc:
         raise RuntimeError("此脚本用于 Google Colab；本地请直接运行 mainline-scanner") from exc
@@ -43,13 +41,8 @@ def main() -> None:
     os.environ["A_SHARE_CHINESE_FONT_PATH"] = str(chinese_font)
     print(f"中文绘图字体: {chinese_font}")
 
-    if USE_GOOGLE_DRIVE_CACHE:
-        drive.mount("/content/drive", force_remount=False)
-        cache_dir = Path("/content/drive/MyDrive/a-share-mainline-scanner/cache")
-        snapshot_dir = Path("/content/drive/MyDrive/a-share-mainline-scanner/snapshots")
-    else:
-        cache_dir = Path("/content/a-share-mainline-cache")
-        snapshot_dir = Path("/content/a-share-mainline-snapshots")
+    cache_dir = Path("/content/a-share-mainline-cache")
+    snapshot_dir = Path("/content/a-share-mainline-snapshots")
     output_dir = Path("/content/a-share-mainline-results")
     cache_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)

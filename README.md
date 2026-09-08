@@ -182,7 +182,7 @@ valuation-scanner --mainline-csv reports/latest/板块完整评分.csv --no-prom
 %run colab/run_scan.py
 ```
 
-`colab/run_scan.py` 会把评分快照与行情缓存一起持久化到 Google Drive。可在脚本顶部设置 `BAOSTOCK_MODE = "industry"` 或 `"all"`。
+`colab/run_scan.py` 会把评分快照与行情缓存保存在 Colab 会话本地磁盘（会话结束后会被清空）。可在脚本顶部设置 `BAOSTOCK_MODE = "industry"` 或 `"all"`。
 
 ## 使用边界
 

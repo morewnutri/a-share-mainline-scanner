@@ -1,4 +1,5 @@
 from mainline_scanner.valuation_cli import (
+    load_mainline_stages,
     load_custom_stocks,
     merge_stock_pools,
     parse_stock_codes,
@@ -32,3 +33,10 @@ def test_default_pool_wins_duplicate():
     merged = merge_stock_pools(default, custom)
     assert merged["600519"]["name"] == "贵州茅台"
     assert "688256" in merged
+
+
+def test_load_mainline_stages_maps_board_alias(tmp_path):
+    path = tmp_path / "板块完整评分.csv"
+    path.write_text("name,lifecycle,mainline_score\n家用电器,Ignition,75\n", encoding="utf-8-sig")
+    cfg = {"sectors": {"家电": {"boards": [{"kind": "industry", "aliases": ["家电行业", "家用电器"]}]}}}
+    assert load_mainline_stages(path, cfg)["家电"] == "Ignition"

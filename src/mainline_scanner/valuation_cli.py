@@ -27,7 +27,16 @@ def _format_output(df: pd.DataFrame) -> pd.DataFrame:
         "profit_growth",
         "value_deviation",
         "profitable_mcap_coverage",
+        "loss_mcap_share",
+        "pe_mcap_coverage",
+        "pb_mcap_coverage",
+        "ps_mcap_coverage",
         "data_coverage",
+        "data_quality",
+        "history_confidence",
+        "margin_of_safety",
+        "valuation_quantile",
+        "volatility_position_scale",
     ]:
         if c in x.columns:
             x[c] = pd.to_numeric(x[c], errors="coerce") * 100
@@ -84,6 +93,42 @@ def merge_stock_pools(
         if code not in merged:
             merged[code] = dict(info)
     return merged
+
+
+def _norm_board_name(value: Any) -> str:
+    return re.sub(r"[\s_（）()\-—·/]|概念|板块|行业", "", str(value)).lower()
+
+
+def load_mainline_stages(path: Path, cfg: dict[str, Any]) -> dict[str, str]:
+    """Map configured valuation families to the latest scanner lifecycle output."""
+    path = Path(path)
+    if not path.exists():
+        return {}
+    try:
+        frame = pd.read_csv(path, encoding="utf-8-sig")
+    except Exception as exc:
+        print(f"[WARN] 无法读取主线阶段文件 {path}: {exc}")
+        return {}
+    if not {"name", "lifecycle"}.issubset(frame.columns):
+        print(f"[WARN] 主线阶段文件缺少 name/lifecycle: {path}")
+        return {}
+    stages: dict[str, str] = {}
+    for sector, sector_cfg in cfg.get("sectors", {}).items():
+        aliases = [sector]
+        for spec in sector_cfg.get("boards", []):
+            aliases.extend(spec.get("aliases", []))
+        normalized = {_norm_board_name(alias) for alias in aliases}
+        hits = frame[frame["name"].map(_norm_board_name).isin(normalized)].copy()
+        if hits.empty:
+            continue
+        score_col = "mainline_score" if "mainline_score" in hits else None
+        if score_col:
+            hits[score_col] = pd.to_numeric(hits[score_col], errors="coerce")
+            hit = hits.sort_values(score_col, ascending=False).iloc[0]
+        else:
+            hit = hits.iloc[0]
+        stages[sector] = str(hit["lifecycle"])
+    return stages
 
 
 def _resolve_new_stock_info(
@@ -180,6 +225,11 @@ def write_outputs(
     stocks = _format_output(pd.DataFrame(stock_rows))
     freshness = _freshness_summary(selection, args, engine.cfg, default_count, custom_count)
     fetch_audit = provider.freshness_frame()
+    warnings = stocks[
+        (stocks.get("name_match", pd.Series(True, index=stocks.index)) == False)
+        | (stocks.get("valuation_status", pd.Series("OK", index=stocks.index)) != "OK")
+        | (stocks.get("history_status", pd.Series("OK", index=stocks.index)) == "FAILED")
+    ].copy()
 
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -187,6 +237,7 @@ def write_outputs(
     stocks.to_csv(out / "个股估值.csv", index=False, encoding="utf-8-sig")
     freshness.to_csv(out / "数据新鲜度.csv", index=False, encoding="utf-8-sig")
     fetch_audit.to_csv(out / "数据抓取审计.csv", index=False, encoding="utf-8-sig")
+    warnings.to_csv(out / "估值风险告警.csv", index=False, encoding="utf-8-sig")
 
     try:
         with pd.ExcelWriter(out / "A股主线估值.xlsx", engine="openpyxl") as w:
@@ -194,6 +245,7 @@ def write_outputs(
             stocks.to_excel(w, sheet_name="个股估值", index=False)
             freshness.to_excel(w, sheet_name="数据新鲜度", index=False)
             fetch_audit.to_excel(w, sheet_name="数据抓取审计", index=False)
+            warnings.to_excel(w, sheet_name="估值风险告警", index=False)
             engine.master.to_excel(w, sheet_name="底层财务数据", index=False)
     except Exception as exc:
         print(f"[WARN] Excel output failed: {exc}")
@@ -224,13 +276,30 @@ def print_results(sectors: pd.DataFrame, stocks: pd.DataFrame, out: Path) -> Non
             "code",
             "sector",
             "stock_source",
-            "current_primary",
-            "fair_primary",
-            "value_deviation",
-            "valuation_label",
+            "model_family",
+            "price",
+            "fair_price_center",
+            "fair_price_low",
+            "fair_price_high",
+            "deep_buy_price",
+            "buy_price",
+            "buy_exit_price",
+            "trim_price",
+            "exit_price",
+            "trade_band_source",
+            "valuation_quantile",
+            "valuation_robust_z",
+            "margin_of_safety",
+            "data_quality",
+            "valuation_confidence",
+            "residual_history_status",
+            "ttm_method",
+            "mainline_stage",
+            "volatility_position_scale",
+            "target_position_pct",
+            "action",
             "growth_gate",
-            "revenue_growth",
-            "profit_growth",
+            "action_reason",
         ]
         if c in stocks.columns
     ]
@@ -267,6 +336,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--cache-dir", default="data/valuation_cache")
     ap.add_argument("--state-dir", default="data/valuation_state")
     ap.add_argument("--output-dir", default="reports/valuation/latest")
+    ap.add_argument("--mainline-csv", default="reports/latest/板块完整评分.csv", help="主线扫描器输出，用于生命周期仓位门槛；文件不存在时明确标记UNKNOWN")
     ap.add_argument("--refresh", action="store_true", help="本次进程内每个数据集绕过磁盘缓存抓取一次")
     ap.add_argument("--no-prompt", action="store_true", help="运行结束后不询问新增股票")
     ap.add_argument("--add-stocks", nargs="*", default=[], help="非交互加入股票，例如 --add-stocks 688256 601138")
@@ -287,6 +357,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     # exactly which financial period powered each run.
     selection = select_report_periods(provider, cfg_raw)
     cfg = apply_report_selection(cfg_raw, selection)
+    cfg["_mainline_stages"] = load_mainline_stages(Path(args.mainline_csv), cfg)
 
     default_stocks = {str(k): dict(v) for k, v in cfg.get("stocks", {}).items()}
     custom = load_custom_stocks(state_dir)
@@ -312,7 +383,7 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     sector_rows = [engine.evaluate_sector(name, c) for name, c in cfg["sectors"].items()]
     stock_rows = [engine.evaluate_stock(code, info) for code, info in cfg.get("stocks", {}).items()]
-    engine.save_snapshots(sector_rows)
+    engine.save_snapshots(sector_rows, stock_rows)
 
     sectors, stocks, out = write_outputs(
         sector_rows,

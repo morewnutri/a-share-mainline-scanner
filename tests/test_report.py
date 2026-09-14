@@ -23,5 +23,8 @@ def test_report_writes_all_artifacts(tmp_path):
     scored = score_boards(build_metric_table(board_frame, histories, flow_frame))
     audit, summary = build_completeness_audit(board_frame, board_frame, histories, [], flow_frame, scored)
     paths = write_outputs(scored, histories, pd.DataFrame(), tmp_path, audit, summary)
-    assert set(paths) == {"csv", "xlsx", "dashboard", "trends", "markdown", "html", "audit_xlsx", "omitted_csv"}
+    assert set(paths) == {
+        "csv", "sideways_csv", "xlsx", "dashboard", "sideways_chart", "trends",
+        "markdown", "html", "audit_xlsx", "omitted_csv",
+    }
     assert all(path.exists() and path.stat().st_size > 0 for path in paths.values())

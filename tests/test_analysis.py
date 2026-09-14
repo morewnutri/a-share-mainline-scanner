@@ -70,3 +70,25 @@ def test_flow_acceleration_compares_only_same_source_and_daily_intensity():
     assert metrics.loc["真实", "flow_acceleration"] == 4.0
     assert metrics.loc["真实", "flow_acceleration_source"].startswith("东方财富同口径")
     assert metrics.loc["代理", "flow_acceleration_source"] == "CMF同口径变化"
+
+
+def test_sideways_seed_finds_low_tight_box_but_not_uptrend():
+    dates = pd.date_range("2026-01-01", periods=65, freq="B")
+    early = np.linspace(120, 92, 25)
+    box = 92 + 1.2 * np.sin(np.linspace(0, 6 * np.pi, 40))
+    low_box = pd.DataFrame({
+        "date": dates, "close": np.r_[early, box],
+        "high": np.r_[early, box] * 1.01, "low": np.r_[early, box] * .99,
+        "amount": np.full(65, 1e9), "turnover": np.full(65, 1.0),
+    })
+    uptrend = make_history(.008, 0, n=65)
+    boards = pd.DataFrame([
+        {"kind": "industry", "code": "BOX", "name": "低位箱体", "breadth": .5},
+        {"kind": "industry", "code": "UP", "name": "上涨趋势", "breadth": .7},
+    ])
+    scored = score_boards(build_metric_table(
+        boards, {("industry", "BOX"): low_box, ("industry", "UP"): uptrend}, pd.DataFrame()
+    )).set_index("name")
+    assert scored.loc["低位箱体", "sideways_seed_status"] in {"横盘火种", "横盘观察"}
+    assert scored.loc["低位箱体", "sideways_seed_score"] > scored.loc["上涨趋势", "sideways_seed_score"]
+    assert scored.loc["上涨趋势", "sideways_seed_status"] == "非横盘"

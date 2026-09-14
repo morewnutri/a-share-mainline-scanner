@@ -8,11 +8,30 @@
     "min_sector_data_coverage": 0.75
   },
   "history_min_points": 30,
+  "valuation_model_version": "3.0.0-independent-lenses",
+  "classification_policy": {
+    "min_confidence": 0.6
+  },
   "valuation_policy": {
     "history_shrinkage_kappa": 60,
     "min_profitable_mcap_coverage": 0.7,
     "min_metric_mcap_coverage": 0.7,
-    "note": "历史权重使用有效样本量做log-space shrinkage；PE盈利市值覆盖不足70%时禁用并切换PB/PS。"
+    "required_model_weight_coverage": 0.7,
+    "bootstrap_initial_weight": 0.3,
+    "bootstrap_max_age_days": 180,
+    "note": "只让独立估值镜头参与组合；有效权重低于70%拒绝交易；版本或成分变化后历史自动隔离。"
+  },
+  "position_policy": {
+    "failed_gate_max_position": 0,
+    "watch_gate_scale": 0.6,
+    "model_prior_max_position": 30,
+    "decay_max_positions": {
+      "深度低估": 20,
+      "低估": 20,
+      "合理": 20,
+      "偏贵": 10,
+      "极端高估": 0
+    }
   },
   "sector_priority": [
     "电力",
@@ -27,6 +46,12 @@
     "机器人",
     "储能电池",
     "商业航天"
+    ,"热管理/汽车零部件"
+    ,"资源循环/稀土资源"
+    ,"过滤材料/功能材料"
+    ,"PCB/电子元件"
+    ,"锂资源"
+    ,"特种纸/功能材料"
   ],
   "sectors": {
     "AI算力": {
@@ -67,6 +92,12 @@
       "growth_cap_pct": 55,
       "fair_pe_floor": 22,
       "fair_pe_cap": 60,
+      "model_weights": {"pe": 0.7, "ps": 0.3},
+      "base_ps": 3.0,
+      "fair_ps_floor": 1.5,
+      "fair_ps_cap": 8.0,
+      "revenue_growth_ps_slope": 0.05,
+      "reference_net_margin": 0.1,
       "bootstrap_metric": "pe",
       "bootstrap_fair": 24.48,
       "bootstrap_asof": "2026-09-03",
@@ -113,6 +144,12 @@
       "growth_cap_pct": 55,
       "fair_pe_floor": 32,
       "fair_pe_cap": 75,
+      "model_weights": {"pe": 0.7, "ps": 0.3},
+      "base_ps": 4.0,
+      "fair_ps_floor": 2.0,
+      "fair_ps_cap": 10.0,
+      "revenue_growth_ps_slope": 0.055,
+      "reference_net_margin": 0.12,
       "bootstrap_metric": "pe",
       "bootstrap_fair": 66.1,
       "bootstrap_asof": "2026-09-03",
@@ -132,6 +169,7 @@
       "boards": [
         {
           "kind": "industry",
+          "board_code": "BK0457",
           "aliases": [
             "电网设备",
             "输配电气"
@@ -155,6 +193,12 @@
       "growth_cap_pct": 30,
       "fair_pe_floor": 20,
       "fair_pe_cap": 40,
+      "model_weights": {"pe": 0.7, "ps": 0.3},
+      "base_ps": 2.0,
+      "fair_ps_floor": 1.0,
+      "fair_ps_cap": 5.0,
+      "revenue_growth_ps_slope": 0.04,
+      "reference_net_margin": 0.09,
       "bootstrap_metric": "pe",
       "bootstrap_fair": 33.68,
       "bootstrap_asof": "2026-09-03",
@@ -165,8 +209,10 @@
       "valuation_boards": [
         {
           "kind": "industry",
+          "board_code": "BK0457",
           "aliases": [
-            "电池"
+            "电网设备",
+            "输配电气"
           ]
         }
       ]
@@ -182,14 +228,19 @@
           ]
         }
       ],
+      "valuation_boards": [
+        {"kind": "industry", "aliases": ["电力行业", "电力"]}
+      ],
       "required_return": 0.09,
       "terminal_growth": 0.03,
       "fair_pe_floor": 12,
       "fair_pe_cap": 22,
       "fair_pb_floor": 0.9,
       "fair_pb_cap": 2.2,
-      "bootstrap_metric": "pe",
-      "bootstrap_fair": 17.92,
+      "model_weights": {"pb": 0.6, "ocf_yield": 0.4},
+      "target_ocf_yield": 0.07,
+      "bootstrap_metric": "pb",
+      "bootstrap_fair": null,
       "bootstrap_asof": "2026-09-03"
     },
     "储能电池": {
@@ -209,11 +260,25 @@
           ]
         }
       ],
+      "valuation_boards": [
+        {"kind": "industry", "aliases": ["电池"]}
+      ],
       "target_peg": 1.0,
       "growth_floor_pct": 8,
       "growth_cap_pct": 30,
       "fair_pe_floor": 16,
       "fair_pe_cap": 32,
+      "model_weights": {"pe": 0.4, "pb": 0.3, "ps": 0.3},
+      "base_pb": 2.0,
+      "fair_pb_floor": 1.0,
+      "fair_pb_cap": 5.0,
+      "reference_roe": 0.08,
+      "roe_pb_slope": 8.0,
+      "base_ps": 2.0,
+      "fair_ps_floor": 0.8,
+      "fair_ps_cap": 5.0,
+      "revenue_growth_ps_slope": 0.04,
+      "reference_net_margin": 0.08,
       "bootstrap_metric": "pe",
       "bootstrap_fair": 24.45,
       "bootstrap_asof": "2026-09-03",
@@ -248,6 +313,12 @@
       "growth_cap_pct": 45,
       "fair_pe_floor": 28,
       "fair_pe_cap": 60,
+      "model_weights": {"pe": 0.7, "ps": 0.3},
+      "base_ps": 3.0,
+      "fair_ps_floor": 1.5,
+      "fair_ps_cap": 8.0,
+      "revenue_growth_ps_slope": 0.05,
+      "reference_net_margin": 0.1,
       "bootstrap_metric": "pe",
       "bootstrap_fair": 43.42,
       "bootstrap_asof": "2026-09-03",
@@ -361,6 +432,12 @@
       "growth_cap_pct": 40,
       "fair_pe_floor": 28,
       "fair_pe_cap": 60,
+      "model_weights": {"pe": 0.7, "ps": 0.3},
+      "base_ps": 3.0,
+      "fair_ps_floor": 1.5,
+      "fair_ps_cap": 8.0,
+      "revenue_growth_ps_slope": 0.05,
+      "reference_net_margin": 0.1,
       "bootstrap_metric": "pe",
       "bootstrap_fair": 62.78,
       "bootstrap_asof": "2026-09-02",
@@ -406,6 +483,11 @@
         "ocf_yield": 0.3,
         "ps": 0.2
       },
+      "base_ps": 3.0,
+      "fair_ps_floor": 1.5,
+      "fair_ps_cap": 7.0,
+      "revenue_growth_ps_slope": 0.04,
+      "reference_net_margin": 0.12,
       "target_ocf_yield": 0.045,
       "base_margin": 0.20,
       "base_uncertainty": 0.16
@@ -439,9 +521,14 @@
       "bootstrap_fair": null,
       "model_weights": {
         "ocf_yield": 0.4,
-        "pe": 0.4,
-        "pb": 0.2
+        "pe": 0.35,
+        "pb": 0.25
       },
+      "base_pb": 2.0,
+      "fair_pb_floor": 1.0,
+      "fair_pb_cap": 4.5,
+      "reference_roe": 0.1,
+      "roe_pb_slope": 7.0,
       "target_ocf_yield": 0.06,
       "base_margin": 0.16,
       "base_uncertainty": 0.13
@@ -474,16 +561,84 @@
       "fair_pe_cap": 22,
       "fair_pb_floor": 0.85,
       "fair_pb_cap": 2.2,
-      "bootstrap_metric": "pe",
+      "bootstrap_metric": "pb",
       "bootstrap_fair": null,
       "model_weights": {
-        "pb": 0.4,
-        "pe": 0.3,
-        "ocf_yield": 0.3
+        "pb": 0.6,
+        "ocf_yield": 0.4
       },
       "target_ocf_yield": 0.07,
       "base_margin": 0.13,
       "base_uncertainty": 0.11
+    },
+    "热管理/汽车零部件": {
+      "model": "quality_growth",
+      "boards": [{"kind": "industry", "aliases": ["汽车零部件"]}, {"kind": "concept", "aliases": ["汽车热管理"]}],
+      "valuation_boards": [{"kind": "industry", "aliases": ["汽车零部件"]}],
+      "target_peg": 1.35, "growth_floor_pct": 8, "growth_cap_pct": 28,
+      "fair_pe_floor": 18, "fair_pe_cap": 42,
+      "base_ps": 2.5, "fair_ps_floor": 1.2, "fair_ps_cap": 6.0,
+      "revenue_growth_ps_slope": 0.04, "reference_net_margin": 0.1,
+      "model_weights": {"pe": 0.5, "ps": 0.2, "ocf_yield": 0.3},
+      "target_ocf_yield": 0.05, "bootstrap_metric": "pe", "bootstrap_fair": null,
+      "base_margin": 0.2, "base_uncertainty": 0.17
+    },
+    "资源循环/稀土资源": {
+      "model": "commodity_cycle",
+      "boards": [{"kind": "concept", "aliases": ["稀土永磁"]}, {"kind": "concept", "aliases": ["固废处理"]}],
+      "valuation_boards": [{"kind": "concept", "aliases": ["稀土永磁"]}],
+      "target_peg": 0.9, "cycle_discount": 0.8, "growth_floor_pct": 6, "growth_cap_pct": 22,
+      "fair_pe_floor": 10, "fair_pe_cap": 25,
+      "base_pb": 1.8, "fair_pb_floor": 0.8, "fair_pb_cap": 3.5, "reference_roe": 0.07, "roe_pb_slope": 6.0,
+      "model_weights": {"pb": 0.45, "pe": 0.25, "ocf_yield": 0.3},
+      "target_ocf_yield": 0.08, "bootstrap_metric": "pb", "bootstrap_fair": null,
+      "base_margin": 0.28, "base_uncertainty": 0.24, "cycle_penalty": 0.06
+    },
+    "过滤材料/功能材料": {
+      "model": "materials_mature",
+      "boards": [{"kind": "industry", "aliases": ["玻璃玻纤"]}, {"kind": "concept", "aliases": ["节能环保"]}],
+      "valuation_boards": [{"kind": "industry", "aliases": ["玻璃玻纤"]}],
+      "target_peg": 1.1, "growth_floor_pct": 5, "growth_cap_pct": 20,
+      "fair_pe_floor": 12, "fair_pe_cap": 28,
+      "base_pb": 1.8, "fair_pb_floor": 0.8, "fair_pb_cap": 3.5, "reference_roe": 0.08, "roe_pb_slope": 6.0,
+      "model_weights": {"pe": 0.35, "pb": 0.3, "ocf_yield": 0.35},
+      "target_ocf_yield": 0.07, "bootstrap_metric": "pe", "bootstrap_fair": null,
+      "base_margin": 0.24, "base_uncertainty": 0.2
+    },
+    "PCB/电子元件": {
+      "model": "quality_growth",
+      "boards": [{"kind": "industry", "aliases": ["电子元件"]}, {"kind": "concept", "aliases": ["PCB"]}],
+      "valuation_boards": [{"kind": "industry", "aliases": ["电子元件"]}],
+      "target_peg": 1.2, "growth_floor_pct": 6, "growth_cap_pct": 25,
+      "fair_pe_floor": 15, "fair_pe_cap": 38,
+      "base_ps": 2.0, "fair_ps_floor": 0.8, "fair_ps_cap": 5.0,
+      "revenue_growth_ps_slope": 0.035, "reference_net_margin": 0.08,
+      "model_weights": {"pe": 0.5, "ps": 0.2, "ocf_yield": 0.3},
+      "target_ocf_yield": 0.065, "bootstrap_metric": "pe", "bootstrap_fair": null,
+      "base_margin": 0.23, "base_uncertainty": 0.19
+    },
+    "锂资源": {
+      "model": "commodity_cycle",
+      "boards": [{"kind": "industry", "aliases": ["能源金属"]}, {"kind": "concept", "aliases": ["锂矿概念"]}],
+      "valuation_boards": [{"kind": "industry", "aliases": ["能源金属"]}],
+      "target_peg": 0.8, "cycle_discount": 0.75, "growth_floor_pct": 5, "growth_cap_pct": 20,
+      "fair_pe_floor": 8, "fair_pe_cap": 22,
+      "base_pb": 1.6, "fair_pb_floor": 0.7, "fair_pb_cap": 3.2, "reference_roe": 0.06, "roe_pb_slope": 6.0,
+      "model_weights": {"pb": 0.45, "pe": 0.25, "ocf_yield": 0.3},
+      "target_ocf_yield": 0.09, "bootstrap_metric": "pb", "bootstrap_fair": null,
+      "base_margin": 0.32, "base_uncertainty": 0.28, "cycle_penalty": 0.08,
+      "note": "免费源暂缺锂价、吨成本和矿权NAV，先以正常化盈利+PB+OCF保守代理；不使用电池PEG。"
+    },
+    "特种纸/功能材料": {
+      "model": "materials_mature",
+      "boards": [{"kind": "industry", "aliases": ["造纸印刷"]}],
+      "valuation_boards": [{"kind": "industry", "aliases": ["造纸印刷"]}],
+      "target_peg": 1.0, "growth_floor_pct": 5, "growth_cap_pct": 18,
+      "fair_pe_floor": 10, "fair_pe_cap": 24,
+      "base_pb": 1.5, "fair_pb_floor": 0.7, "fair_pb_cap": 3.0, "reference_roe": 0.07, "roe_pb_slope": 5.0,
+      "model_weights": {"pe": 0.35, "pb": 0.3, "ocf_yield": 0.35},
+      "target_ocf_yield": 0.08, "bootstrap_metric": "pe", "bootstrap_fair": null,
+      "base_margin": 0.27, "base_uncertainty": 0.22, "cycle_penalty": 0.04
     }
   },
   "stocks": {
@@ -577,7 +732,7 @@
     },
     "603601": {
       "name": "再升科技",
-      "sector": "电子化学品"
+      "sector": "过滤材料/功能材料"
     },
     "603283": {
       "name": "赛腾股份",
@@ -585,7 +740,7 @@
     },
     "000823": {
       "name": "超声电子",
-      "sector": "半导体"
+      "sector": "PCB/电子元件"
     },
     "002922": {
       "name": "伊戈尔",
@@ -597,15 +752,23 @@
     },
     "002050": {
       "name": "三花智控",
-      "sector": "储能电池"
+      "sector": "热管理/汽车零部件"
     },
     "002645": {
       "name": "华宏科技",
-      "sector": "公用事业"
+      "sector": "资源循环/稀土资源"
     },
     "605111": {
       "name": "新洁能",
       "sector": "半导体"
+    },
+    "002240": {
+      "name": "盛新锂能",
+      "sector": "锂资源"
+    },
+    "603733": {
+      "name": "仙鹤股份",
+      "sector": "特种纸/功能材料"
     }
   }
 }

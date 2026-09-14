@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "a-share-mainline-scanner"
-version = "2.1.1"
+version = "3.0.0"
 description = "A股行业与概念板块主线/潜在主线扫描器"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -18,6 +18,7 @@ dependencies = [
   "tenacity>=8.2",
   "tqdm>=4.66",
   "baostock>=0.9.3,<1",
+  "exchange-calendars>=4.11,<5",
 ]
 
 [project.optional-dependencies]

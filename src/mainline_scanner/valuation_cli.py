@@ -25,7 +25,8 @@ def _format_output(df: pd.DataFrame) -> pd.DataFrame:
     for c in [
         "revenue_growth",
         "profit_growth",
-        "value_deviation",
+        "price_deviation",
+        "multiple_deviation",
         "profitable_mcap_coverage",
         "loss_mcap_share",
         "pe_mcap_coverage",
@@ -36,7 +37,7 @@ def _format_output(df: pd.DataFrame) -> pd.DataFrame:
         "history_confidence",
         "margin_of_safety",
         "valuation_quantile",
-        "volatility_position_scale",
+        "uncertainty_position_scale",
     ]:
         if c in x.columns:
             x[c] = pd.to_numeric(x[c], errors="coerce") * 100
@@ -141,10 +142,14 @@ def _resolve_new_stock_info(
     if hit.empty:
         return None
     name = str(hit.iloc[0]["name"])
-    sector = provider.infer_stock_sector(code, cfg)
+    inference = provider.infer_stock_sector(code, cfg)
     return {
         "name": name,
-        "sector": sector,
+        "sector": inference["sector"],
+        "suggested_sector": inference.get("suggested_sector", ""),
+        "classification_status": inference["classification_status"],
+        "classification_confidence": inference["classification_confidence"],
+        "sector_candidates": inference["sector_candidates"],
         "source": "user",
         "added_at": datetime.now().astimezone().isoformat(timespec="seconds"),
     }
@@ -225,11 +230,24 @@ def write_outputs(
     stocks = _format_output(pd.DataFrame(stock_rows))
     freshness = _freshness_summary(selection, args, engine.cfg, default_count, custom_count)
     fetch_audit = provider.freshness_frame()
-    warnings = stocks[
+    warning_mask = (
         (stocks.get("name_match", pd.Series(True, index=stocks.index)) == False)
         | (stocks.get("valuation_status", pd.Series("OK", index=stocks.index)) != "OK")
-        | (stocks.get("history_status", pd.Series("OK", index=stocks.index)) == "FAILED")
-    ].copy()
+        | (stocks.get("history_status", pd.Series("OK", index=stocks.index)) != "OK")
+        | (stocks.get("residual_history_status", pd.Series("OK", index=stocks.index)) != "OK")
+        | (stocks.get("trade_band_source", pd.Series("", index=stocks.index)) == "MODEL_PRIOR_BANDS")
+        | (stocks.get("mainline_stage", pd.Series("", index=stocks.index)) == "UNKNOWN")
+        | stocks.get("risk_flags", pd.Series("", index=stocks.index)).astype(str).ne("")
+    )
+    warnings = stocks[warning_mask].copy()
+    unknown_share = float((stocks.get("mainline_stage", pd.Series("", index=stocks.index)) == "UNKNOWN").mean()) if len(stocks) else 0.0
+    if unknown_share >= .80:
+        runtime_warning = {column: None for column in warnings.columns}
+        runtime_warning.update({
+            "entity": "运行级告警", "type": "runtime", "valuation_status": "MAINLINE_DATA_UNAVAILABLE",
+            "risk_flags": "MAINLINE_DATA_UNAVAILABLE", "action_reason": f"{unknown_share:.0%} 个股主线阶段为 UNKNOWN",
+        })
+        warnings = pd.concat([warnings, pd.DataFrame([runtime_warning])], ignore_index=True)
 
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -261,7 +279,7 @@ def print_results(sectors: pd.DataFrame, stocks: pd.DataFrame, out: Path) -> Non
             "model",
             "current_primary",
             "fair_primary",
-            "value_deviation",
+            "multiple_deviation",
             "valuation_label",
             "revenue_growth",
             "profit_growth",
@@ -295,7 +313,7 @@ def print_results(sectors: pd.DataFrame, stocks: pd.DataFrame, out: Path) -> Non
             "residual_history_status",
             "ttm_method",
             "mainline_stage",
-            "volatility_position_scale",
+            "uncertainty_position_scale",
             "target_position_pct",
             "action",
             "growth_gate",

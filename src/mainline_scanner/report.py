@@ -102,11 +102,41 @@ def make_trend_chart(scored: pd.DataFrame, histories: dict[tuple[str, str], pd.D
     plt.close(fig)
 
 
+def make_sideways_seed_chart(scored: pd.DataFrame, out_path: Path) -> None:
+    configure_chinese_font()
+    ranked = _deduplicate_for_display(scored, "sideways_seed_score").nlargest(24, "sideways_seed_score")
+    fig, axes = plt.subplots(1, 2, figsize=(17, 8), constrained_layout=True)
+    bars = ranked.head(18).sort_values("sideways_seed_score")
+    colors = ["#d35400" if s == "横盘火种" else "#f5b041" if s == "横盘观察" else "#95a5a6" for s in bars["sideways_seed_status"]]
+    axes[0].barh(bars["name"], bars["sideways_seed_score"], color=colors)
+    axes[0].axvline(60, color="#777", ls="--"); axes[0].axvline(70, color="#222", ls="--")
+    axes[0].set(title="低位箱体横盘火种评分", xlabel="0–100")
+    axes[1].scatter(ranked["box_range_20d_pct"], ranked["range_position_60d_pct"], c=ranked["sideways_seed_score"], cmap="YlOrRd", s=70)
+    for _, row in ranked.head(12).iterrows():
+        axes[1].annotate(str(row["name"]), (row["box_range_20d_pct"], row["range_position_60d_pct"]), xytext=(3, 3), textcoords="offset points", fontsize=8)
+    axes[1].axvline(15, color="#777", ls="--"); axes[1].axhline(55, color="#777", ls="--")
+    axes[1].set(title="箱体宽度 vs 60日区间位置", xlabel="20日箱体振幅（%）", ylabel="60日区间位置（%）")
+    fig.suptitle("A股板块横盘火种雷达", fontsize=18, fontweight="bold")
+    fig.savefig(out_path, dpi=170, bbox_inches="tight")
+    plt.close(fig)
+
+
 def _fmt_table(df: pd.DataFrame, n: int = 20) -> str:
     cols = ["kind", "name", "lifecycle", "mainline_score", "ignition_score", "confirmation_score", "ret_5d", "ret_10d", "slope_5d", "acceleration", "flow_5d_pct", "breadth", "amount_ratio_5_20"]
     cols = [c for c in cols if c in df]
     x = df[cols].head(n).copy()
     if "kind" in x: x["kind"] = x["kind"].map(KIND_CN).fillna(x["kind"])
+    return x.to_markdown(index=False, floatfmt=".2f")
+
+
+def _fmt_sideways_table(df: pd.DataFrame, n: int = 20) -> str:
+    cols = [
+        "kind", "name", "sideways_seed_status", "sideways_seed_score", "box_range_20d_pct",
+        "range_position_60d_pct", "distance_high_60d_pct", "slope_20d", "volatility_ratio_5_20",
+    ]
+    x = df[[c for c in cols if c in df]].head(n).copy()
+    if "kind" in x:
+        x["kind"] = x["kind"].map(KIND_CN).fillna(x["kind"])
     return x.to_markdown(index=False, floatfmt=".2f")
 
 
@@ -127,7 +157,11 @@ def write_outputs(
     html_path = output_dir / "主线判断报告.html"
     audit_xlsx = output_dir / "数据完整性审计.xlsx"
     omitted_csv = output_dir / "遗漏板块明细.csv"
+    sideways_csv = output_dir / "横盘火种.csv"
+    sideways_chart = output_dir / "横盘火种雷达.png"
     scored.to_csv(full_csv, index=False, encoding="utf-8-sig")
+    sideways = scored[scored.get("sideways_seed_status", pd.Series("", index=scored.index)).isin(["横盘火种", "横盘观察"])].sort_values("sideways_seed_score", ascending=False)
+    sideways.to_csv(sideways_csv, index=False, encoding="utf-8-sig")
     with pd.ExcelWriter(xlsx, engine="openpyxl") as writer:
         scored.to_excel(writer, sheet_name="完整评分", index=False)
         scored[scored["status"].str.startswith("主线")].to_excel(writer, sheet_name="当前主线", index=False)
@@ -135,6 +169,7 @@ def write_outputs(
             scored[scored["lifecycle"].isin(["Seed", "Ignition"])].sort_values("ignition_score", ascending=False).to_excel(
                 writer, sheet_name="火种雷达", index=False,
             )
+        sideways.to_excel(writer, sheet_name="横盘火种", index=False)
         scored[scored["status"].isin(["潜在启动", "值得关注"])].sort_values("candidate_score", ascending=False).to_excel(writer, sheet_name="潜在主线", index=False)
         failures.to_excel(writer, sheet_name="抓取失败", index=False)
         if audit_summary is not None:
@@ -146,6 +181,7 @@ def write_outputs(
             ws.column_dimensions["B"].width = 20
     make_dashboard(scored, dashboard)
     make_trend_chart(scored, histories, trends)
+    make_sideways_seed_chart(scored, sideways_chart)
     if audit is not None and audit_summary is not None:
         with pd.ExcelWriter(audit_xlsx, engine="openpyxl") as writer:
             audit_summary.to_excel(writer, sheet_name="汇总", index=False)
@@ -164,6 +200,8 @@ def write_outputs(
     main = display_scored[display_scored["status"].str.startswith("主线")].sort_values("mainline_score", ascending=False)
     candidate = _deduplicate_for_display(scored, "ignition_score")
     candidate = candidate[candidate.get("lifecycle", pd.Series(index=candidate.index, dtype=str)).isin(["Seed", "Ignition"])].sort_values("ignition_score", ascending=False)
+    sideways_display = _deduplicate_for_display(scored, "sideways_seed_score")
+    sideways_display = sideways_display[sideways_display["sideways_seed_status"].isin(["横盘火种", "横盘观察"])].sort_values("sideways_seed_score", ascending=False)
     as_of = pd.to_datetime(scored["as_of"]).max().date()
     coverage_text = ""
     if audit_summary is not None and not audit_summary.empty:
@@ -187,10 +225,15 @@ def write_outputs(
 
 {_fmt_table(candidate if not candidate.empty else scored.sort_values('candidate_score', ascending=False), 20)}
 
+## 横盘火种（低位箱体）
+
+{_fmt_sideways_table(sideways_display, 20) if not sideways_display.empty else '当前没有满足绝对门槛的低位箱体板块。'}
+
 ## 判定逻辑
 
 - **主线分**：5/10 日涨幅、趋势斜率及拟合质量、相对强弱、5/10 日主力净流入占比、上涨家数占比、量能和上涨持续性。
 - **火种分**：优先使用排名跃迁、广度增量、板块成交额份额增量、同口径资金强度变化；快照历史不足时才更多依赖当日加速度与量能异常。过去 5/10 日已经大涨会扣分。
+- **横盘火种分**：独立筛选 20 日窄箱体、20 日低斜率、5/20 日波动收缩、接近箱底且位于 60 日区间低位的行业或概念；至少需要 40 个交易日，绝对门槛未通过不会仅凭横截面排名入选。
 - **确认分**（兼容字段 `candidate_score`）：保留原有短斜率、加速度、相对强弱和量价扩张逻辑，用于确认扩散，而不再冒充真正的早期发现分。
 - 生命周期为 `Dormant → Seed → Ignition → Diffusion → Mainline → Crowded/Decay`；首次运行缺少排名和广度轨迹，连续保存快照后火种分才具备完整信息。
 - 东方财富主力资金与 CMF 代理分别做横截面标准化，CMF 信号按较低置信度收缩；资金加速度也只在同口径内计算。
@@ -202,9 +245,9 @@ def write_outputs(
     html_path.write_text(f"""<!doctype html><meta charset='utf-8'><title>A股主线雷达</title>
 <style>body{{font-family:'Microsoft YaHei',sans-serif;max-width:1500px;margin:auto;padding:24px;background:#f7f8fa}}img{{max-width:100%;background:white}}table{{border-collapse:collapse;background:white;font-size:12px}}th,td{{padding:6px 8px;border:1px solid #ddd;white-space:nowrap}}th{{position:sticky;top:0;background:#263238;color:white}}h1{{color:#263238}}</style>
 <h1>A股板块主线雷达</h1><p>数据截止 {as_of}；共 {len(scored)} 个有效板块。</p>
-<img src='{html.escape(dashboard.name)}'><img src='{html.escape(trends.name)}'><h2>完整评分（前100）</h2>{table_html}
+<img src='{html.escape(dashboard.name)}'><img src='{html.escape(sideways_chart.name)}'><img src='{html.escape(trends.name)}'><h2>完整评分（前100）</h2>{table_html}
 """, encoding="utf-8")
-    paths = {"csv": full_csv, "xlsx": xlsx, "dashboard": dashboard, "trends": trends, "markdown": md, "html": html_path}
+    paths = {"csv": full_csv, "sideways_csv": sideways_csv, "xlsx": xlsx, "dashboard": dashboard, "sideways_chart": sideways_chart, "trends": trends, "markdown": md, "html": html_path}
     if audit is not None:
         paths.update({"audit_xlsx": audit_xlsx, "omitted_csv": omitted_csv})
     return paths

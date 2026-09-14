@@ -156,11 +156,34 @@ def weighted_geometric_price(items: Iterable[tuple[float, float, str]]) -> tuple
     return float(math.exp(center_log)), disagreement, [name for _, _, name in valid]
 
 
-def data_quality_score(parts: dict[str, float]) -> float:
-    weights = {"ttm": 0.30, "growth": 0.15, "history": 0.15, "cashflow": 0.15, "sector": 0.10, "freshness": 0.15}
+def data_quality_score(parts: dict[str, float], model_family: str = "") -> float:
+    """Return a model-aware quality score.
+
+    Coverage and age are deliberately separate.  The old ``freshness`` input
+    is accepted as a compatibility alias for ``report_coverage``.
+    """
+    profiles = {
+        "utility": {"ttm": .22, "growth": .08, "history": .08, "cashflow": .22, "sector": .10,
+                    "report_coverage": .10, "financial_age": .10, "quote_age": .10},
+        "innovation_drug": {"ttm": .18, "growth": .22, "history": .08, "cashflow": .08, "sector": .14,
+                            "report_coverage": .10, "financial_age": .10, "quote_age": .10},
+        "early_growth_ps": {"ttm": .18, "growth": .22, "history": .08, "cashflow": .08, "sector": .14,
+                            "report_coverage": .10, "financial_age": .10, "quote_age": .10},
+        "commodity_cycle": {"ttm": .20, "growth": .10, "history": .12, "cashflow": .18, "sector": .10,
+                            "report_coverage": .10, "financial_age": .10, "quote_age": .10},
+    }
+    weights = profiles.get(model_family, {
+        "ttm": .24, "growth": .16, "history": .10, "cashflow": .12, "sector": .10,
+        "report_coverage": .10, "financial_age": .09, "quote_age": .09,
+    })
+    values = dict(parts)
+    if "report_coverage" not in values and "freshness" in values:
+        values["report_coverage"] = values["freshness"]
+        values.setdefault("financial_age", values["freshness"])
+        values.setdefault("quote_age", values["freshness"])
     score = 0.0
     for key, weight in weights.items():
-        value = float(parts.get(key, 0.0))
+        value = float(values.get(key, 0.0))
         score += weight * min(1.0, max(0.0, value if np.isfinite(value) else 0.0))
     return float(min(1.0, max(0.0, score)))
 
@@ -242,6 +265,12 @@ def position_policy(
     tradable: bool,
     gate: str,
     previous_target: float | None = None,
+    *,
+    failed_gate_max_position: int = 0,
+    watch_gate_scale: float = 0.60,
+    prior_band_max_position: int | None = None,
+    trade_band_source: str = "",
+    decay_max_positions: dict[str, int] | None = None,
 ) -> tuple[int, str, str]:
     if not tradable or not np.isfinite(price):
         return 0, "NO_TRADE", "模型或数据门槛未通过"
@@ -257,21 +286,39 @@ def position_policy(
     else:
         target, zone = 0, "极端高估"
 
-    if previous_target is not None and np.isfinite(previous_target) and not gate.startswith("不通过") and stage != "Decay":
+    if (
+        previous_target is not None and np.isfinite(previous_target) and gate.startswith("通过")
+        and stage != "Decay" and trade_band_source != "MODEL_PRIOR_BANDS"
+    ):
         buy_exit = float(bands.get("buy_exit_price", buy))
         if previous_target >= 70 and buy < price <= buy_exit and target < previous_target:
             return int(previous_target), "HOLD_HYSTERESIS", "已处建仓状态，价格尚未越过Q35退出阈值"
 
     stage = stage or "UNKNOWN"
-    if gate.startswith("不通过") and target > 40:
-        return 0, "NO_TRADE", f"{zone}但{gate}，防止价值陷阱"
+    if gate.startswith("不通过"):
+        cap = max(0, int(failed_gate_max_position))
+        if cap <= 0:
+            return 0, "NO_TRADE", f"{zone}但{gate}，业绩门槛失败"
+        target = min(target, cap)
+        return target, "WATCH_ONLY", f"{zone}但{gate}，仅允许观察仓"
+
+    if gate.startswith("观察"):
+        target = int(5 * round((target * min(1.0, max(0.0, watch_gate_scale))) / 5))
+
+    if trade_band_source == "MODEL_PRIOR_BANDS" and prior_band_max_position is not None:
+        target = min(target, max(0, int(prior_band_max_position)))
+
+    if stage == "Decay":
+        caps = decay_max_positions or {"深度低估": 20, "低估": 20, "合理": 20, "偏贵": 10, "极端高估": 0}
+        target = min(target, int(caps.get(zone, 0)))
+        if target <= 0:
+            return 0, "EXIT_PRIORITY", f"{zone}+主线Decay，退出优先"
+        return target, "TRIM_OR_WAIT", f"{zone}+主线Decay，执行全区间限仓"
     if zone in {"深度低估", "低估"}:
         if stage in {"Seed", "Ignition"}:
             return target, "BUILD_POSITION", f"{zone}+{stage}，允许分批建仓"
         if stage in {"Mainline", "Diffusion"}:
             return target, "ADD_OR_HOLD", f"{zone}+{stage}，加仓或持有"
-        if stage == "Decay":
-            return min(target, 20), "WAIT", f"{zone}但主线Decay，防价值陷阱"
         return min(target, 30), "WAIT_MAINLINE_CONFIRMATION", f"{zone}但缺少主线确认"
     if zone == "合理":
         return target, "HOLD_OR_WAIT", f"估值合理，主线阶段={stage}"

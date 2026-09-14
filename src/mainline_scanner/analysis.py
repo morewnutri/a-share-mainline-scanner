@@ -37,6 +37,7 @@ def calculate_board_metrics(history: pd.DataFrame) -> dict[str, float | str | pd
     slope3, r2_3 = _log_slope(close, 3)
     slope5, r2_5 = _log_slope(close, 5)
     slope10, r2_10 = _log_slope(close, 10)
+    slope20, r2_20 = _log_slope(close, min(20, len(close)))
     prior_slope5, _ = _log_slope(close, 5, offset=3)
     daily = close.pct_change()
     ma20 = close.tail(20).mean()
@@ -45,6 +46,16 @@ def calculate_board_metrics(history: pd.DataFrame) -> dict[str, float | str | pd
     turnover = h.get("turnover", pd.Series(index=h.index, dtype=float))
     amount20 = amount.tail(20).mean()
     turnover20 = turnover.tail(20).mean()
+    high_series = pd.to_numeric(h.get("high", close), errors="coerce").fillna(close)
+    low_series = pd.to_numeric(h.get("low", close), errors="coerce").fillna(close)
+    box_high20 = float(high_series.tail(20).max())
+    box_low20 = float(low_series.tail(20).min())
+    level_window = min(60, len(h))
+    level_high = float(high_series.tail(level_window).max())
+    level_low = float(low_series.tail(level_window).min())
+    level_span = level_high - level_low
+    vol20 = float(daily.tail(20).std(ddof=0) * 100)
+    vol5 = float(daily.tail(5).std(ddof=0) * 100)
     result: dict[str, float | str | pd.Timestamp] = {
         "as_of": h["date"].iloc[-1],
         "last_close": close.iloc[-1],
@@ -53,12 +64,20 @@ def calculate_board_metrics(history: pd.DataFrame) -> dict[str, float | str | pd
         "ret_5d": _return(close, 5), "ret_10d": _return(close, 10),
         "ret_20d": _return(close, 20),
         "slope_3d": slope3, "slope_5d": slope5, "slope_10d": slope10,
+        "slope_20d": slope20, "trend_r2_20d": r2_20,
         "acceleration": slope3 - prior_slope5 if np.isfinite(prior_slope5) else slope3 - slope10,
         "trend_r2_5d": r2_5, "trend_r2_10d": r2_10,
         "positive_days_10": float((daily.tail(10) > 0).mean()),
         "volatility_10d": float(daily.tail(10).std(ddof=0) * 100),
+        "volatility_5d": vol5, "volatility_20d": vol20,
+        "volatility_ratio_5_20": vol5 / vol20 if vol20 > 0 else np.nan,
         "distance_ma20": float((close.iloc[-1] / ma20 - 1) * 100) if ma20 else np.nan,
         "distance_high20": float((close.iloc[-1] / high20 - 1) * 100) if high20 else np.nan,
+        "box_range_20d_pct": (box_high20 / box_low20 - 1) * 100 if box_low20 > 0 else np.nan,
+        "distance_low_20d_pct": (float(close.iloc[-1]) / box_low20 - 1) * 100 if box_low20 > 0 else np.nan,
+        "range_position_60d_pct": (float(close.iloc[-1]) - level_low) / level_span * 100 if level_span > 0 else 50.0,
+        "distance_high_60d_pct": (float(close.iloc[-1]) / level_high - 1) * 100 if level_high > 0 else np.nan,
+        "level_lookback_days": level_window,
         "amount_ratio_5_20": float(amount.tail(5).mean() / amount20) if amount20 and np.isfinite(amount20) else np.nan,
         "turnover_ratio_5_20": float(turnover.tail(5).mean() / turnover20) if turnover20 and np.isfinite(turnover20) else np.nan,
         "drawdown_10d": float((close.iloc[-1] / close.tail(10).cummax() - 1).min() * 100),
@@ -215,6 +234,28 @@ def score_boards(metrics: pd.DataFrame) -> pd.DataFrame:
         x["ignition_score"] = _weighted_score(x, ignition_weights)
         early_crowding = ((x["ret_5d"] - 8).clip(lower=0) * .9 + (x["ret_10d"] - 15).clip(lower=0) * .45).clip(upper=22)
         x["ignition_score"] = (x["ignition_score"] - early_crowding.fillna(0)).clip(0, 100)
+        # “横盘火种”是另一条正交于动量点火的路径：低位、窄箱体、斜率平、
+        # 波动收缩且没有继续破位。这里使用绝对阈值，避免弱市里按相对排名
+        # 把所有下跌板块都抬成高分。
+        tightness = ((18 - x["box_range_20d_pct"]) / 12).clip(0, 1)
+        flatness = (1 - x["slope_20d"].abs() / .50).clip(0, 1)
+        low_level = ((55 - x["range_position_60d_pct"]) / 55).clip(0, 1)
+        near_support = (1 - x["distance_low_20d_pct"] / 12).clip(0, 1)
+        contraction = ((1.20 - x["volatility_ratio_5_20"]) / .80).clip(0, 1)
+        stable = ((x["drawdown_10d"] >= -8) & (x["slope_5d"] >= -.60)).astype(float)
+        x["sideways_seed_score"] = (
+            .25 * tightness + .20 * flatness + .20 * low_level + .15 * near_support
+            + .10 * contraction.fillna(.5) + .10 * stable
+        ) * 100
+        enough_history = x["level_lookback_days"] >= 40
+        box_ok = (
+            enough_history & (x["box_range_20d_pct"] <= 15) & (x["slope_20d"].abs() <= .35)
+            & (x["range_position_60d_pct"] <= 55) & (x["distance_high_60d_pct"] <= -8)
+        )
+        x["sideways_seed_status"] = "非横盘"
+        x.loc[~enough_history, "sideways_seed_status"] = "数据不足"
+        x.loc[box_ok & (x["sideways_seed_score"] >= 60), "sideways_seed_status"] = "横盘观察"
+        x.loc[box_ok & (x["sideways_seed_score"] >= 70), "sideways_seed_status"] = "横盘火种"
         main_ok = (x["slope_5d"] > 0) & (x["ret_10d"] > 0) & (x.get("breadth", .5).fillna(.5) >= .45)
         candidate_ok = (x["slope_3d"] > 0) & (x["acceleration"] > 0) & (x["ret_10d"] < 18)
         x["status"] = "普通"

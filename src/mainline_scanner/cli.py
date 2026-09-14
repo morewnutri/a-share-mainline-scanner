@@ -97,6 +97,13 @@ def run(args: argparse.Namespace) -> dict[str, Path]:
     print("\n=== 潜在主线 Top 20 ===")
     potential = scored[scored["lifecycle"].isin(["Seed", "Ignition"])]
     print(potential.sort_values("ignition_score", ascending=False)[show_cols].head(20).to_string(index=False, float_format=lambda x: f"{x:7.2f}"))
+    sideways_cols = [
+        "kind", "name", "sideways_seed_status", "sideways_seed_score", "box_range_20d_pct",
+        "range_position_60d_pct", "distance_high_60d_pct", "slope_20d", "volatility_ratio_5_20",
+    ]
+    sideways = scored[scored["sideways_seed_status"].isin(["横盘火种", "横盘观察"])]
+    print("\n=== 横盘火种 Top 20 ===")
+    print(sideways.sort_values("sideways_seed_score", ascending=False)[sideways_cols].head(20).to_string(index=False, float_format=lambda x: f"{x:7.2f}"))
     print(f"\n报告已写入: {args.output_dir.resolve()}")
     return paths
 

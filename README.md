@@ -146,8 +146,10 @@ mainline-backtest --snapshot-dir data/snapshots --output-dir reports/backtest
 默认输出到 `reports/latest/`：
 
 - `板块完整评分.csv`
-- `板块主线扫描.xlsx`（含“火种雷达”工作表）
+- `横盘火种.csv`
+- `板块主线扫描.xlsx`（含“火种雷达”和“横盘火种”工作表）
 - `主线雷达.png`
+- `横盘火种雷达.png`
 - `领先板块走势.png`
 - `主线判断报告.md/.html`
 - `数据完整性审计.xlsx`
@@ -194,7 +196,7 @@ valuation-scanner --mainline-csv reports/latest/板块完整评分.csv --no-prom
 %run colab/run_scan.py
 ```
 
-`colab/run_scan.py` 会把评分快照与行情缓存一起持久化到 Google Drive。可在脚本顶部设置 `BAOSTOCK_MODE = "industry"` 或 `"all"`。
+`colab/run_scan.py` 与 `colab/run_valuation.py` 均只使用 Colab 本地 `/content`，不会挂载或依赖 Google Drive。扫描脚本会直接显示主线、动量火种、横盘火种、完整性审计及三张图；估值脚本应使用 `%run colab/run_valuation.py`，以便 notebook 中的新增股票输入框正常工作。会话结束后 `/content` 会被清除，需要留存时请手动下载。可在扫描脚本顶部设置 `BAOSTOCK_MODE = "industry"` 或 `"all"`。
 
 ## 使用边界
 

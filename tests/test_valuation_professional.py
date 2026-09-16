@@ -236,6 +236,20 @@ def test_curated_config_fixes_wrong_board_and_stock_classifications():
     assert cfg["stocks"]["000823"]["sector"] == "PCB/电子元件"
 
 
+def test_exact_only_board_resolution_still_checks_exact_aliases():
+    provider = object.__new__(ValuationDataProvider)
+    provider.board_catalog = lambda kind: pd.DataFrame({
+        "板块名称": ["半导体", "半导体设备"],
+        "板块代码": ["BK1036", "BK9999"],
+    })
+
+    resolved = provider.resolve_board("industry", ["半导体"], exact_only=True)
+    assert resolved is not None
+    assert resolved.board_name == "半导体"
+    assert resolved.board_code == "BK1036"
+    assert provider.resolve_board("industry", ["半导"], exact_only=True) is None
+
+
 def test_performance_prefers_attributable_profit_over_generic_profit():
     provider = object.__new__(ValuationDataProvider)
     raw = pd.DataFrame([{

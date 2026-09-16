@@ -400,14 +400,17 @@ class ValuationDataProvider:
                 return BoardResolved(kind, str(board_code), match[0], match[1])
             return None
         normalized = [(_norm_name(n), n, c) for n, c in rows]
-        if exact_only:
-            return None
         for alias in aliases:
             a = _norm_name(alias)
             exact = [x for x in normalized if x[0] == a]
             if exact:
                 _, n, c = exact[0]
                 return BoardResolved(kind, alias, n, c)
+        # valuation_boards deliberately disables fuzzy matching, but exact
+        # aliases must still be attempted.  Returning before the exact loop
+        # made every code-less valuation board fail resolution.
+        if exact_only:
+            return None
         for alias in aliases:
             a = _norm_name(alias)
             fuzzy = [x for x in normalized if a in x[0] or x[0] in a]
@@ -460,6 +463,7 @@ class ValuationDataProvider:
 
         chunks: list[pd.DataFrame] = []
         resolved_all: list[BoardResolved] = []
+        unresolved: list[str] = []
         for spec in board_specs:
             resolved = self.resolve_board(
                 spec["kind"], spec.get("aliases", []),
@@ -469,13 +473,15 @@ class ValuationDataProvider:
             if not resolved:
                 if board_key == "valuation_boards":
                     requested = spec.get("board_code") or "/".join(spec.get("aliases", []))
-                    raise ValueError(f"估值板块必须精确匹配，未找到 {spec['kind']}:{requested}")
+                    unresolved.append(f"{spec['kind']}:{requested}")
                 continue
             resolved_all.append(resolved)
             c = self.board_constituents(resolved)
             c["source_kind"] = resolved.kind
             chunks.append(c)
         if not chunks:
+            if unresolved:
+                raise ValueError(f"估值板块必须精确匹配，未找到 {';'.join(unresolved)}")
             result = pd.DataFrame(columns=["code", "name", "board_hits"])
             self._sector_universe_memory[cache_key] = (result.copy(), resolved_all)
             return result, resolved_all
@@ -483,6 +489,7 @@ class ValuationDataProvider:
         board_count = allc.groupby("code")["board"].nunique().rename("board_hits")
         names = allc.groupby("code")["name"].first()
         result = pd.concat([names, board_count], axis=1).reset_index()
+        result.attrs["unresolved_valuation_boards"] = ";".join(unresolved)
         self._sector_universe_memory[cache_key] = (result.copy(), resolved_all)
         return result, resolved_all
 
@@ -1182,9 +1189,16 @@ class ValuationEngine(_LegacyValuationEngine):
         try:
             u, resolved = self.p.sector_universe(c, purpose="valuation")
         except Exception as exc:
-            return {"entity": name, "type": "sector", "valuation_status": "BOARD_RESOLUTION_FAILED", "error": str(exc)}
+            return {
+                "entity": name, "type": "sector", "model": c.get("model", ""),
+                "valuation_status": "BOARD_RESOLUTION_FAILED", "error": str(exc),
+            }
         if u.empty:
-            return {"entity": name, "type": "sector", "valuation_status": "DATA_UNAVAILABLE", "error": "未解析到估值样本"}
+            return {
+                "entity": name, "type": "sector", "model": c.get("model", ""),
+                "valuation_status": "DATA_UNAVAILABLE", "error": "未解析到估值样本",
+            }
+        unresolved_boards = str(u.attrs.get("unresolved_valuation_boards", ""))
         universe_hash = _stable_hash(sorted(u["code"].astype(str).unique().tolist()))
         m = self._aggregate(u)
         configured_primary = str(c.get("bootstrap_metric", "pe"))
@@ -1250,6 +1264,7 @@ class ValuationEngine(_LegacyValuationEngine):
             "entity": name, "type": "sector", "model": c["model"],
             "valuation_model_version": self.model_version, "config_hash": self.config_hash, "universe_hash": universe_hash,
             "resolved_boards": ";".join(f"{r.kind}:{r.board_name}({r.board_code})" for r in resolved), **m,
+            "unresolved_valuation_boards": unresolved_boards,
             "primary_metric": primary, "configured_primary_metric": configured_primary,
             "current_primary": m.get(primary, np.nan), "fair_primary": fair_by_metric.get(primary, np.nan),
             "fair_pe": fair_by_metric["pe"], "fair_pb": fair_by_metric["pb"], "fair_ps": fair_by_metric["ps"],

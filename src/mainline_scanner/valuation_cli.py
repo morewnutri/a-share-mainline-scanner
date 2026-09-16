@@ -228,6 +228,9 @@ def write_outputs(
 ) -> tuple[pd.DataFrame, pd.DataFrame, Path]:
     sectors = _format_output(pd.DataFrame(sector_rows))
     stocks = _format_output(pd.DataFrame(stock_rows))
+    stock_front = ["entity", "code", "sector", "action", "growth_gate", "action_reason"]
+    stock_front = [column for column in stock_front if column in stocks.columns]
+    stocks = stocks[stock_front + [column for column in stocks.columns if column not in stock_front]]
     freshness = _freshness_summary(selection, args, engine.cfg, default_count, custom_count)
     fetch_audit = provider.freshness_frame()
     warning_mask = (
@@ -277,6 +280,10 @@ def print_results(sectors: pd.DataFrame, stocks: pd.DataFrame, out: Path) -> Non
         for c in [
             "entity",
             "model",
+            "valuation_status",
+            "error",
+            "resolved_boards",
+            "unresolved_valuation_boards",
             "current_primary",
             "fair_primary",
             "multiple_deviation",
@@ -293,6 +300,9 @@ def print_results(sectors: pd.DataFrame, stocks: pd.DataFrame, out: Path) -> Non
             "entity",
             "code",
             "sector",
+            "action",
+            "growth_gate",
+            "action_reason",
             "stock_source",
             "model_family",
             "price",
@@ -315,9 +325,6 @@ def print_results(sectors: pd.DataFrame, stocks: pd.DataFrame, out: Path) -> Non
             "mainline_stage",
             "uncertainty_position_scale",
             "target_position_pct",
-            "action",
-            "growth_gate",
-            "action_reason",
         ]
         if c in stocks.columns
     ]

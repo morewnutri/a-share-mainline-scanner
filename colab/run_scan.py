@@ -1,4 +1,7 @@
-"""Google Colab runner: scan, then display tables and charts inline."""
+"""Google Colab runner: scan, then display tables and charts inline.
+
+All files stay under /content; Google Drive is neither mounted nor required.
+"""
 from __future__ import annotations
 
 import subprocess
@@ -9,17 +12,15 @@ from pathlib import Path
 # ===== 可修改配置 =====
 BOARD_TYPES = ["industry", "concept"]
 WORKERS = 2
-LOOKBACK_CALENDAR_DAYS = 75
+LOOKBACK_CALENDAR_DAYS = 120
 REFRESH = False
 SCAN_ALL_SOURCE_BOARDS = True
-USE_GOOGLE_DRIVE_CACHE = True
 BAOSTOCK_MODE = "off"  # industry 较慢；all 还会合成概念，首次运行可能很慢
 # ====================
 
 
 def main() -> None:
     try:
-        from google.colab import drive
         from IPython.display import Image, Markdown, display
     except ImportError as exc:
         raise RuntimeError("此脚本用于 Google Colab；本地请直接运行 mainline-scanner") from exc
@@ -43,16 +44,11 @@ def main() -> None:
     os.environ["A_SHARE_CHINESE_FONT_PATH"] = str(chinese_font)
     print(f"中文绘图字体: {chinese_font}")
 
-    if USE_GOOGLE_DRIVE_CACHE:
-        drive.mount("/content/drive", force_remount=False)
-        cache_dir = Path("/content/drive/MyDrive/a-share-mainline-scanner/cache")
-        snapshot_dir = Path("/content/drive/MyDrive/a-share-mainline-scanner/snapshots")
-    else:
-        cache_dir = Path("/content/a-share-mainline-cache")
-        snapshot_dir = Path("/content/a-share-mainline-snapshots")
+    cache_dir = Path("/content/a-share-mainline-cache")
+    snapshot_dir = Path("/content/a-share-mainline-snapshots")
     output_dir = Path("/content/a-share-mainline-results")
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    for path in (cache_dir, snapshot_dir, output_dir):
+        path.mkdir(parents=True, exist_ok=True)
 
     command = [
         sys.executable, "-m", "mainline_scanner.cli",
@@ -97,6 +93,21 @@ def main() -> None:
     ].sort_values("ignition_score", ascending=False).drop_duplicates(["kind", "_display_group"])
     display(candidate_rank[columns].head(30))
 
+    sideways_columns = [
+        "kind", "name", "sideways_seed_status", "sideways_seed_score",
+        "box_range_20d_pct", "range_position_60d_pct", "distance_high_60d_pct",
+        "slope_20d", "volatility_ratio_5_20",
+    ]
+    sideways_columns = [col for col in sideways_columns if col in display_scored]
+    display(Markdown("## 横盘火种（低位箱体）Top 30"))
+    sideways_rank = display_scored[
+        display_scored["sideways_seed_status"].isin(["横盘火种", "横盘观察"])
+    ].sort_values("sideways_seed_score", ascending=False).drop_duplicates(["kind", "_display_group"])
+    if len(sideways_rank):
+        display(sideways_rank[sideways_columns].head(30))
+    else:
+        display(Markdown("本次没有板块同时通过低位、窄箱体、低斜率和波动收缩门槛。"))
+
     audit_file = output_dir / "数据完整性审计.xlsx"
     summary = pd.read_excel(audit_file, sheet_name="汇总")
     audit = pd.read_excel(audit_file, sheet_name="全部板块审计")
@@ -125,9 +136,14 @@ def main() -> None:
 
     display(Markdown("## 主线雷达"))
     display(Image(filename=str(output_dir / "主线雷达.png")))
+    sideways_chart = output_dir / "横盘火种雷达.png"
+    if sideways_chart.is_file():
+        display(Markdown("## 横盘火种雷达"))
+        display(Image(filename=str(sideways_chart)))
     display(Markdown("## 领先板块近30日走势"))
     display(Image(filename=str(output_dir / "领先板块走势.png")))
-    print(f"\n结果已在上方直接显示；临时报告目录：{output_dir}（不自动下载）")
+    print(f"\n结果已在上方直接显示；临时报告目录：{output_dir}（Colab 会话结束后清除，不自动下载）")
+    print(f"横盘火种明细：{output_dir / '横盘火种.csv'}")
 
 
 if __name__ == "__main__":

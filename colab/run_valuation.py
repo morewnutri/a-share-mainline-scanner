@@ -1,4 +1,4 @@
-"""Google Colab valuation runner with persistent custom stocks in Google Drive.
+"""Google Colab valuation runner using only the notebook's local /content disk.
 
 Run in a Colab cell with:
 
@@ -15,14 +15,11 @@ from pathlib import Path
 
 # ===== 可修改配置 =====
 REFRESH = True
-USE_GOOGLE_DRIVE = True
-DRIVE_ROOT = "/content/drive/MyDrive/a-share-mainline-scanner"
 # ====================
 
 
 def main() -> None:
     try:
-        from google.colab import drive
         from IPython.display import Markdown, display
     except ImportError as exc:
         raise RuntimeError("此脚本用于 Google Colab；本地请运行 valuation-scanner 或 python -m mainline_scanner.valuation_cli") from exc
@@ -30,16 +27,9 @@ def main() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-e", str(repo_root)], check=True)
 
-    if USE_GOOGLE_DRIVE:
-        drive.mount("/content/drive", force_remount=False)
-        persistent_root = Path(DRIVE_ROOT)
-        cache_dir = persistent_root / "valuation_cache"
-        state_dir = persistent_root / "valuation_state"
-        output_dir = persistent_root / "valuation_reports" / "latest"
-    else:
-        cache_dir = Path("/content/a-share-valuation-cache")
-        state_dir = Path("/content/a-share-valuation-state")
-        output_dir = Path("/content/a-share-valuation-results")
+    cache_dir = Path("/content/a-share-valuation-cache")
+    state_dir = Path("/content/a-share-valuation-state")
+    output_dir = Path("/content/a-share-valuation-results")
 
     for path in (cache_dir, state_dir, output_dir):
         path.mkdir(parents=True, exist_ok=True)
@@ -65,7 +55,8 @@ def main() -> None:
     print(output_dir / "板块估值.csv")
     print(output_dir / "个股估值.csv")
     print(output_dir / "数据新鲜度.csv")
-    print(f"\n自定义股票永久保存在: {state_dir / 'custom_stocks.json'}")
+    print(f"\n自定义股票保存在本次会话: {state_dir / 'custom_stocks.json'}")
+    print("提示：Colab 会话结束后 /content 会被清除；需要留存时请手动下载结果。")
 
 
 if __name__ == "__main__":

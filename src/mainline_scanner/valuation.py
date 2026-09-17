@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import math
 import re
 from dataclasses import dataclass
@@ -12,25 +12,6 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
-
-VALUATION_MODEL_VERSION = "3.0.0-independent-lenses"
-
-
-def _stable_hash(value: Any) -> str:
-    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
-
-
-def _age_score(as_of: Any, today: date, full_days: int, zero_days: int) -> float:
-    parsed = pd.to_datetime(as_of, errors="coerce")
-    if pd.isna(parsed):
-        return 0.0
-    age = max(0, (today - pd.Timestamp(parsed).date()).days)
-    if age <= full_days:
-        return 1.0
-    if age >= zero_days:
-        return 0.0
-    return float(1.0 - (age - full_days) / max(zero_days - full_days, 1))
 
 from .valuation_policy import (
     HistoryStats,
@@ -51,13 +32,38 @@ from .valuation_policy import (
 
 try:
     from .data import EastmoneyAkshareProvider
-except Exception:  # pragma: no cover - allows standalone import during unit tests
+except Exception:  # pragma: no cover
     EastmoneyAkshareProvider = None  # type: ignore
+
+
+# 3.1 changes the actual valuation semantics.  Bump the version so old point-in-time
+# snapshots are never mixed with the confidence-aware model.
+VALUATION_MODEL_VERSION = "3.1.0-confidence-aware"
+
+
+def _stable_hash(value: Any) -> str:
+    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _age_score(as_of: Any, today: date, full_days: int, zero_days: int) -> float:
+    parsed = pd.to_datetime(as_of, errors="coerce")
+    if pd.isna(parsed):
+        return 0.0
+    age = max(0, (today - pd.Timestamp(parsed).date()).days)
+    if age <= full_days:
+        return 1.0
+    if age >= zero_days:
+        return 0.0
+    return float(1.0 - (age - full_days) / max(zero_days - full_days, 1))
 
 
 def _num(s: pd.Series | Any) -> pd.Series | float:
     if isinstance(s, pd.Series):
-        return pd.to_numeric(s.astype(str).str.replace(",", "", regex=False).str.replace("%", "", regex=False), errors="coerce")
+        return pd.to_numeric(
+            s.astype(str).str.replace(",", "", regex=False).str.replace("%", "", regex=False),
+            errors="coerce",
+        )
     try:
         return float(str(s).replace(",", "").replace("%", ""))
     except Exception:
@@ -89,7 +95,6 @@ def _clip(x: float, lo: float, hi: float) -> float:
 
 
 def _geomean_ratio(items: list[tuple[float, float]]) -> float:
-    """items = [(ratio, weight)], returns weighted geometric mean ratio."""
     vals = [(r, w) for r, w in items if np.isfinite(r) and r > 0 and w > 0]
     if not vals:
         return float("nan")
@@ -98,7 +103,6 @@ def _geomean_ratio(items: list[tuple[float, float]]) -> float:
 
 
 def valuation_label(deviation: float) -> str:
-    """Deviation > 0 means market valuation is above fair value."""
     if not np.isfinite(deviation):
         return "无法判断"
     if deviation <= -0.25:
@@ -134,7 +138,6 @@ class ReportSelection:
 
 
 def annualization_factor(report_date: str) -> float:
-    """Convert cumulative interim figures/ROE to an approximate annual rate."""
     suffix = str(report_date)[-4:]
     return {"0331": 4.0, "0630": 2.0, "0930": 4.0 / 3.0, "1231": 1.0}.get(suffix, 1.0)
 
@@ -151,12 +154,6 @@ def report_period_triplet(current: str) -> tuple[str, str, str]:
 
 
 def completed_report_candidates(today: date | None = None, limit: int = 8) -> list[str]:
-    """Newest broadly-complete A-share interim periods, newest first.
-
-    Q1 is treated as complete from Apr-30, H1 from Aug-31, Q3 from Oct-31.
-    Annual reports are used as the TTM base, not as the cross-sectional current
-    period, because Q1 becomes complete at the same statutory cutoff.
-    """
     if today is None:
         try:
             today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
@@ -173,11 +170,7 @@ def completed_report_candidates(today: date | None = None, limit: int = 8) -> li
 
 
 class ValuationDataProvider:
-    """
-    Valuation data layer designed to sit on top of the existing repository's
-    EastmoneyAkshareProvider, thereby reusing its AKShare object, Eastmoney
-    retry/fallback logic and disk cache convention.
-    """
+    """Public-data valuation layer reusing the repository's market-data provider."""
 
     def __init__(self, cache_dir: Path, refresh: bool = False, ttl_hours: float = 12):
         if EastmoneyAkshareProvider is None:
@@ -188,9 +181,6 @@ class ValuationDataProvider:
         self.ttl = timedelta(hours=ttl_hours)
         self.base = EastmoneyAkshareProvider(cache_dir=self.cache_dir / "market", refresh=refresh)
         self.ak = self.base.ak
-        # --refresh means "fetch once from source in this process", not "refetch
-        # every time the same logical dataset is requested". This avoids duplicate
-        # network calls during report-date validation, valuation and sector inference.
         self._memory_frames: dict[str, pd.DataFrame] = {}
         self._fetch_audit: dict[str, dict[str, Any]] = {}
         self._sector_universe_memory: dict[str, tuple[pd.DataFrame, list[BoardResolved]]] = {}
@@ -198,7 +188,6 @@ class ValuationDataProvider:
     def _cached_frame(self, key: str, loader, ttl: timedelta | None = None) -> pd.DataFrame:
         if key in self._memory_frames:
             return self._memory_frames[key].copy()
-
         p = self.cache_dir / f"{key}.csv"
         t = ttl or self.ttl
         cache_used = False
@@ -214,7 +203,6 @@ class ValuationDataProvider:
             p.parent.mkdir(parents=True, exist_ok=True)
             df.to_csv(p, index=False, encoding="utf-8-sig")
             fetched_at = datetime.now()
-
         self._memory_frames[key] = df.copy()
         self._fetch_audit[key] = {
             "dataset": key,
@@ -229,12 +217,13 @@ class ValuationDataProvider:
 
     def freshness_frame(self) -> pd.DataFrame:
         if not self._fetch_audit:
-            return pd.DataFrame(columns=["dataset", "rows", "cache_used", "refresh_requested", "fetched_at", "cache_path", "ttl_minutes"])
+            return pd.DataFrame(columns=[
+                "dataset", "rows", "cache_used", "refresh_requested", "fetched_at", "cache_path", "ttl_minutes"
+            ])
         return pd.DataFrame(self._fetch_audit.values()).sort_values("dataset").reset_index(drop=True)
 
     @staticmethod
     def latest_trade_date(today: date | None = None) -> str:
-        """Latest real Shanghai Stock Exchange session, including CN holidays."""
         today = today or datetime.now(ZoneInfo("Asia/Shanghai")).date()
         try:
             import exchange_calendars as xcals
@@ -245,11 +234,11 @@ class ValuationDataProvider:
             )
             if len(sessions):
                 return pd.Timestamp(sessions[-1]).date().isoformat()
-        except ModuleNotFoundError:  # pragma: no cover - source-tree tests before dependency install
+        except ModuleNotFoundError:  # pragma: no cover
             while today.weekday() >= 5:
                 today -= timedelta(days=1)
             return today.isoformat()
-        except Exception as exc:  # pragma: no cover - dependency/runtime safety
+        except Exception as exc:  # pragma: no cover
             raise RuntimeError(f"无法解析上交所交易日历: {exc}") from exc
         raise RuntimeError(f"上交所交易日历在 {today} 前未返回交易日")
 
@@ -258,21 +247,14 @@ class ValuationDataProvider:
             try:
                 return self.ak.stock_zh_a_spot_em()
             except Exception:
-                # Reuse the repository's direct Eastmoney JSON route as a fallback.
                 rows: list[dict] = []
                 page = 1
                 while True:
                     params = {
-                        "pn": page,
-                        "pz": 200,
-                        "po": 1,
-                        "np": 1,
-                        "ut": "bd1d9ddb04089700cf9c27f6f7426281",
-                        "fltt": 2,
-                        "invt": 2,
-                        "fid": "f3",
-                        "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23",
-                        "fields": "f2,f3,f9,f12,f14,f20,f21,f23"
+                        "pn": page, "pz": 200, "po": 1, "np": 1,
+                        "ut": "bd1d9ddb04089700cf9c27f6f7426281", "fltt": 2, "invt": 2,
+                        "fid": "f3", "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23",
+                        "fields": "f2,f3,f9,f12,f14,f20,f21,f23",
                     }
                     payload = self.base._eastmoney_json("/api/qt/clist/get", params)
                     data = payload.get("data") or {}
@@ -283,7 +265,7 @@ class ValuationDataProvider:
                     page += 1
                 return pd.DataFrame(rows).rename(columns={
                     "f12": "代码", "f14": "名称", "f2": "最新价", "f3": "涨跌幅",
-                    "f9": "市盈率-动态", "f20": "总市值", "f21": "流通市值", "f23": "市净率"
+                    "f9": "市盈率-动态", "f20": "总市值", "f21": "流通市值", "f23": "市净率",
                 })
 
         df = self._cached_frame("a_spot", load_ak, timedelta(minutes=5)).copy()
@@ -308,6 +290,7 @@ class ValuationDataProvider:
     def performance(self, date: str) -> pd.DataFrame:
         def load() -> pd.DataFrame:
             return self.ak.stock_yjbb_em(date=date)
+
         raw = self._cached_frame(f"performance_{date}", load, timedelta(hours=18)).copy()
         code_col = _pick(raw.columns, "股票代码", "代码")
         name_col = _pick(raw.columns, "股票简称", "名称")
@@ -358,8 +341,6 @@ class ValuationDataProvider:
                         x[column] = x[f"net_profit_{suffix}"]
                     else:
                         x[column] = np.nan
-        # Every TTM-like value carries provenance. Annualised interim values are
-        # retained for cautious fallback models but can never masquerade as exact TTM.
         factor = annualization_factor(current)
         for target, stem in (
             ("ttm_revenue", "revenue"),
@@ -370,19 +351,21 @@ class ValuationDataProvider:
             exact_value = x[f"{stem}_ann"] + x[f"{stem}_cur"] - x[f"{stem}_pri"]
             estimated = x[f"{stem}_cur"] * factor
             x[target] = exact_value.where(exact, estimated.where(x[f"{stem}_cur"].notna(), np.nan))
-            x[f"{target}_method"] = [ttm_method(current, bool(a), bool(b)) for a, b in zip(exact, x[f"{stem}_cur"].notna())]
+            x[f"{target}_method"] = [
+                ttm_method(current, bool(a), bool(b)) for a, b in zip(exact, x[f"{stem}_cur"].notna())
+            ]
             x[f"{target}_confidence"] = x[f"{target}_method"].map(TTM_CONFIDENCE).fillna(0.0)
-        # Per-share metrics are not additive across periods when the share count
-        # changes.  They are derived from TTM totals and current shares in the
-        # engine.  OCFPS keeps an explicitly low-confidence annualised fallback
-        # only when the provider does not expose total operating cash flow.
         x["ttm_eps"] = np.nan
         x["ttm_eps_method"] = "DERIVE_FROM_TTM_ATTRIBUTABLE_PROFIT_AND_CURRENT_SHARES"
         x["ttm_eps_confidence"] = 0.0
         ocf_fallback = x["ocfps_cur"] * factor
         x["ttm_ocfps"] = ocf_fallback.where(x["ocfps_cur"].notna(), np.nan)
-        x["ttm_ocfps_method"] = np.where(x["ocfps_cur"].notna(), f"ANNUALIZED_CURRENT_PER_SHARE_{current[-4:]}", "MISSING")
-        x["ttm_ocfps_confidence"] = np.where(x["ocfps_cur"].notna(), min(0.35, TTM_CONFIDENCE[ttm_method(current, False, True)]), 0.0)
+        x["ttm_ocfps_method"] = np.where(
+            x["ocfps_cur"].notna(), f"ANNUALIZED_CURRENT_PER_SHARE_{current[-4:]}", "MISSING"
+        )
+        x["ttm_ocfps_confidence"] = np.where(
+            x["ocfps_cur"].notna(), min(0.35, TTM_CONFIDENCE[ttm_method(current, False, True)]), 0.0
+        )
         return x
 
     def board_catalog(self, kind: str) -> pd.DataFrame:
@@ -391,7 +374,9 @@ class ValuationDataProvider:
             return raw[["板块名称", "板块代码"]].drop_duplicates()
         return self._cached_frame(f"board_catalog_{kind}", load, timedelta(minutes=30)).copy()
 
-    def resolve_board(self, kind: str, aliases: list[str], *, exact_only: bool = False, board_code: str = "") -> BoardResolved | None:
+    def resolve_board(
+        self, kind: str, aliases: list[str], *, exact_only: bool = False, board_code: str = ""
+    ) -> BoardResolved | None:
         cat = self.board_catalog(kind)
         rows = [(str(r["板块名称"]), str(r["板块代码"])) for _, r in cat.iterrows()]
         if board_code:
@@ -406,9 +391,6 @@ class ValuationDataProvider:
             if exact:
                 _, n, c = exact[0]
                 return BoardResolved(kind, alias, n, c)
-        # valuation_boards deliberately disables fuzzy matching, but exact
-        # aliases must still be attempted.  Returning before the exact loop
-        # made every code-less valuation board fail resolution.
         if exact_only:
             return None
         for alias in aliases:
@@ -424,7 +406,6 @@ class ValuationDataProvider:
         key = f"board_cons_{resolved.kind}_{resolved.board_code}"
 
         def load() -> pd.DataFrame:
-            # AKShare first; direct Eastmoney fallback, mirroring the repo's data strategy.
             try:
                 if resolved.kind == "industry":
                     return self.ak.stock_board_industry_cons_em(symbol=resolved.board_name)
@@ -434,12 +415,12 @@ class ValuationDataProvider:
                     "pn": 1, "pz": 1000, "po": 1, "np": 1,
                     "ut": "bd1d9ddb04089700cf9c27f6f7426281", "fltt": 2, "invt": 2,
                     "fid": "f3", "fs": f"b:{resolved.board_code} f:!50",
-                    "fields": "f2,f3,f9,f12,f14,f20,f23"
+                    "fields": "f2,f3,f9,f12,f14,f20,f23",
                 }
                 payload = self.base._eastmoney_json("/api/qt/clist/get", params)
                 return pd.DataFrame((payload.get("data") or {}).get("diff") or []).rename(columns={
                     "f12": "代码", "f14": "名称", "f2": "最新价", "f3": "涨跌幅",
-                    "f9": "市盈率-动态", "f20": "总市值", "f23": "市净率"
+                    "f9": "市盈率-动态", "f20": "总市值", "f23": "市净率",
                 })
 
         raw = self._cached_frame(key, load, timedelta(minutes=30))
@@ -453,14 +434,15 @@ class ValuationDataProvider:
             "board": resolved.board_name,
         }).dropna(subset=["code"]).drop_duplicates("code")
 
-    def sector_universe(self, sector_cfg: dict[str, Any], purpose: str = "inference") -> tuple[pd.DataFrame, list[BoardResolved]]:
+    def sector_universe(
+        self, sector_cfg: dict[str, Any], purpose: str = "inference"
+    ) -> tuple[pd.DataFrame, list[BoardResolved]]:
         board_key = "valuation_boards" if purpose == "valuation" and sector_cfg.get("valuation_boards") else "boards"
         board_specs = sector_cfg.get(board_key, [])
         cache_key = purpose + ":" + json.dumps(board_specs, ensure_ascii=False, sort_keys=True)
         if cache_key in self._sector_universe_memory:
             u, r = self._sector_universe_memory[cache_key]
             return u.copy(), list(r)
-
         chunks: list[pd.DataFrame] = []
         resolved_all: list[BoardResolved] = []
         unresolved: list[str] = []
@@ -494,7 +476,6 @@ class ValuationDataProvider:
         return result, resolved_all
 
     def infer_stock_sector(self, code: str, config: dict[str, Any]) -> dict[str, Any]:
-        """Return auditable candidates and refuse ambiguous automatic models."""
         priority = list(config.get("sector_priority", config.get("sectors", {}).keys()))
         priority_rank = {name: i for i, name in enumerate(priority)}
         candidates: list[dict[str, Any]] = []
@@ -515,8 +496,10 @@ class ValuationDataProvider:
                 "priority": priority_rank.get(sector_name, 999),
             })
         if not candidates:
-            return {"sector": "MODEL_UNRESOLVED", "classification_status": "MODEL_UNRESOLVED",
-                    "classification_confidence": 0.0, "sector_candidates": []}
+            return {
+                "sector": "MODEL_UNRESOLVED", "classification_status": "MODEL_UNRESOLVED",
+                "classification_confidence": 0.0, "sector_candidates": [],
+            }
         candidates.sort(key=lambda row: (-row["score"], -row["board_hits"], row["priority"]))
         top = candidates[0]
         runner = candidates[1] if len(candidates) > 1 else None
@@ -532,338 +515,26 @@ class ValuationDataProvider:
         }
 
     def stock_history_indicator(self, code: str) -> pd.DataFrame:
-        """Optional AKShare/LeGu history with visible status and sorted trade dates."""
         key = f"indicator_{code}"
         try:
             frame = self._cached_frame(key, lambda: self.ak.stock_a_indicator_lg(symbol=code), timedelta(hours=18))
             frame = prepare_history(frame)
-            frame.attrs.update(history_status="OK" if len(frame) else "EMPTY", history_source="AKShare/LeGu", history_error="")
+            frame.attrs.update(
+                history_status="OK" if len(frame) else "EMPTY",
+                history_source="AKShare/LeGu", history_error="",
+            )
             return frame
         except Exception as exc:
             frame = pd.DataFrame()
-            frame.attrs.update(history_status="FAILED", history_source="AKShare/LeGu", history_error=f"{type(exc).__name__}: {exc}")
+            frame.attrs.update(
+                history_status="FAILED", history_source="AKShare/LeGu",
+                history_error=f"{type(exc).__name__}: {exc}",
+            )
             return frame
 
 
-class _LegacyValuationEngine:
-    def __init__(self, provider: ValuationDataProvider, config: dict[str, Any], state_dir: Path):
-        self.p = provider
-        self.cfg = config
-        self.state_dir = Path(state_dir)
-        self.state_dir.mkdir(parents=True, exist_ok=True)
-        self.spot = self.p.spot()
-        self.report_date = str(config["report_date"])
-        self.roe_annualization_factor = annualization_factor(self.report_date)
-        self.fund = self.p.fundamentals_ttm(
-            self.report_date, config["prior_report_date"], config["annual_report_date"]
-        )
-        self.master = self.spot.merge(self.fund, on="code", how="left")
-        self.master["pe_ttm_calc"] = np.where(
-            (self.master["ttm_profit"] > 0) & (self.master["market_cap"] > 0),
-            self.master["market_cap"] / self.master["ttm_profit"], np.nan
-        )
-        self.master["ps_ttm_calc"] = np.where(
-            (self.master["ttm_revenue"] > 0) & (self.master["market_cap"] > 0),
-            self.master["market_cap"] / self.master["ttm_revenue"], np.nan
-        )
-
-    def _aggregate(self, universe: pd.DataFrame) -> dict[str, float]:
-        x = universe[["code"]].drop_duplicates().merge(self.master, on="code", how="left")
-        x = x[x["market_cap"].notna() & (x["market_cap"] > 0)].copy()
-        total_mv = x["market_cap"].sum()
-        pos = x[x["ttm_profit"] > 0]
-        pe = pos["market_cap"].sum() / pos["ttm_profit"].sum() if len(pos) and pos["ttm_profit"].sum() > 0 else np.nan
-        revenue_sum = x.loc[x["ttm_revenue"] > 0, "ttm_revenue"].sum()
-        ps = total_mv / revenue_sum if revenue_sum > 0 else np.nan
-        pb_x = x[(x["pb"] > 0) & x["pb"].notna()].copy()
-        book = (pb_x["market_cap"] / pb_x["pb"]).sum()
-        pb = pb_x["market_cap"].sum() / book if book > 0 else np.nan
-
-        # Aggregate current-period growth from actual current/prior numbers, avoiding arithmetic averaging of percentages.
-        both_rev = x[(x["revenue_cur"] > 0) & (x["revenue_pri"] > 0)]
-        rev_growth = both_rev["revenue_cur"].sum() / both_rev["revenue_pri"].sum() - 1 if len(both_rev) else np.nan
-        both_p = x[x["net_profit_pri"].notna() & x["net_profit_cur"].notna()]
-        prior_profit = both_p["net_profit_pri"].sum()
-        profit_growth = both_p["net_profit_cur"].sum() / prior_profit - 1 if prior_profit > 0 else np.nan
-        roe = float(np.nanmedian(x["roe_h1_pct_cur"])) if x["roe_h1_pct_cur"].notna().any() else np.nan
-        gross = float(np.nanmedian(x["gross_margin_pct_cur"])) if x["gross_margin_pct_cur"].notna().any() else np.nan
-        profitable_coverage = pos["market_cap"].sum() / total_mv if total_mv > 0 else np.nan
-        ttm_revenue_coverage = x["ttm_revenue"].notna().mean() if len(x) else 0.0
-        ttm_profit_coverage = x["ttm_profit"].notna().mean() if len(x) else 0.0
-        revenue_growth_coverage = len(both_rev) / len(x) if len(x) else 0.0
-        profit_growth_coverage = len(both_p) / len(x) if len(x) else 0.0
-        data_coverage = min(ttm_revenue_coverage, ttm_profit_coverage, revenue_growth_coverage, profit_growth_coverage)
-        return {
-            "constituents": len(x), "market_cap": total_mv, "pe": pe, "pb": pb, "ps": ps,
-            "revenue_growth": rev_growth, "profit_growth": profit_growth,
-            "roe_h1_pct": roe, "gross_margin_pct": gross,
-            "profitable_mcap_coverage": profitable_coverage, "data_coverage": data_coverage,
-            "ttm_revenue_coverage": ttm_revenue_coverage, "ttm_profit_coverage": ttm_profit_coverage,
-            "revenue_growth_coverage": revenue_growth_coverage, "profit_growth_coverage": profit_growth_coverage,
-        }
-
-    @staticmethod
-    def _normalized_growth_pct(m: dict[str, float], c: dict[str, Any] | None = None) -> float:
-        rg = m.get("revenue_growth", np.nan) * 100
-        pg = m.get("profit_growth", np.nan) * 100
-        c = c or {}
-        if np.isfinite(pg) and np.isfinite(rg):
-            # Current-period profit can explode because of a low base, loss-to-profit reversals,
-            # memory/commodity cycles or one-off gains. Do not capitalize that full jump into
-            # a perpetual PEG multiple. Limit sustainable profit growth to a configurable
-            # premium over revenue growth before weighting the two.
-            premium_cap = c.get("profit_growth_premium_cap_pct")
-            if premium_cap is not None and np.isfinite(float(premium_cap)):
-                pg = min(pg, rg + float(premium_cap))
-            return 0.65 * _clip(pg, -30, 80) + 0.35 * _clip(rg, -30, 60)
-        if np.isfinite(pg):
-            return _clip(pg, -30, 80)
-        return _clip(rg, -30, 60) if np.isfinite(rg) else np.nan
-
-    def _history_fair(self, entity: str, metric: str, bootstrap: float | None) -> tuple[float, str]:
-        p = self.state_dir / "valuation_snapshots.csv"
-        min_points = int(self.cfg.get("history_min_points", 30))
-        if p.exists():
-            h = pd.read_csv(p)
-            q = h[(h["entity"] == entity) & h[metric].notna()]
-            if len(q) >= min_points:
-                return float(q[metric].tail(252).median()), f"自建历史中位数({len(q.tail(252))}点)"
-        if bootstrap is not None and np.isfinite(bootstrap):
-            return float(bootstrap), "bootstrap历史中位数"
-        return np.nan, "无历史基准"
-
-    def _model_fair(self, name: str, c: dict[str, Any], m: dict[str, float]) -> tuple[dict[str, float], str]:
-        model = c["model"]
-        g = self._normalized_growth_pct(m, c)
-        fair: dict[str, float] = {"pe": np.nan, "pb": np.nan, "ps": np.nan}
-        note = ""
-
-        if model in {"growth_pe", "cyclical_growth"}:
-            gf = float(c.get("growth_floor_pct", 10))
-            gc = float(c.get("growth_cap_pct", 40))
-            g_used = _clip(g, gf, gc) if np.isfinite(g) else gf
-            fair["pe"] = _clip(float(c["target_peg"]) * g_used, float(c["fair_pe_floor"]), float(c["fair_pe_cap"]))
-            if model == "cyclical_growth":
-                # Cyclicals should not capitalize peak growth as aggressively.
-                fair["pe"] *= 0.90
-            note = f"PEG/正常化增长模型(g={g_used:.1f}%)"
-
-        elif model == "utility":
-            roe_annual = m.get("roe_h1_pct", np.nan) * self.roe_annualization_factor / 100
-            k = float(c.get("required_return", 0.09))
-            tg = float(c.get("terminal_growth", 0.03))
-            if np.isfinite(roe_annual) and roe_annual > tg and k > tg:
-                fair_pb = (roe_annual - tg) / (k - tg)
-                fair["pb"] = _clip(fair_pb, float(c["fair_pb_floor"]), float(c["fair_pb_cap"]))
-                fair["pe"] = _clip(fair["pb"] / roe_annual, float(c["fair_pe_floor"]), float(c["fair_pe_cap"]))
-            else:
-                fair["pe"] = (float(c["fair_pe_floor"]) + float(c["fair_pe_cap"])) / 2
-                fair["pb"] = (float(c["fair_pb_floor"]) + float(c["fair_pb_cap"])) / 2
-            note = "PB-ROE/Gordon + PE约束"
-
-        elif model in {"innovation_drug", "early_growth_ps"}:
-            rg = m.get("revenue_growth", np.nan) * 100
-            rg = _clip(rg, -10, 50) if np.isfinite(rg) else 0
-            fair_ps = float(c.get("base_ps", 3.0)) + max(rg, 0) * float(c.get("revenue_growth_ps_slope", 0.06))
-            if model == "innovation_drug" and m.get("profit_growth", -1) > 0 and m.get("profitable_mcap_coverage", 0) > 0.6:
-                fair_ps += float(c.get("profitable_ps_bonus", 0.8))
-            fair["ps"] = _clip(fair_ps, float(c["fair_ps_floor"]), float(c["fair_ps_cap"]))
-            note = "PS/收入增长模型" if model == "early_growth_ps" else "创新药PS+盈利兑现模型"
-        return fair, note
-
-    def evaluate_sector(self, name: str, c: dict[str, Any]) -> dict[str, Any]:
-        u, resolved = self.p.sector_universe(c, purpose="valuation")
-        if u.empty:
-            return {"entity": name, "type": "sector", "error": "未解析到板块成分"}
-        m = self._aggregate(u)
-        primary = c.get("bootstrap_metric", "pe")
-        min_cov = float(c.get("min_data_coverage", self.cfg.get("report_policy", {}).get("min_sector_data_coverage", 0.75)))
-        growth_required = c.get("model") in {"growth_pe", "cyclical_growth", "innovation_drug", "early_growth_ps"}
-        missing_growth = growth_required and (not np.isfinite(m.get("revenue_growth", np.nan)) or not np.isfinite(m.get("profit_growth", np.nan)))
-        if m.get("data_coverage", 0.0) < min_cov or missing_growth or not np.isfinite(m.get(primary, np.nan)):
-            resolved_names = ";".join(f"{r.kind}:{r.board_name}" for r in resolved)
-            return {
-                "entity": name, "type": "sector", "model": c["model"], "resolved_boards": resolved_names,
-                **m, "primary_metric": primary, "current_primary": m.get(primary, np.nan),
-                "fair_primary": np.nan, "fair_source": "数据覆盖不足，拒绝估值", "value_deviation": np.nan,
-                "valuation_label": "数据不足", "model_note": f"coverage={m.get('data_coverage', 0.0):.1%}, min={min_cov:.1%}",
-            }
-
-        fair_model, model_note = self._model_fair(name, c, m)
-
-        primary = c.get("bootstrap_metric", "pe")
-        bootstrap = c.get("bootstrap_fair")
-        hist_fair, hist_source = self._history_fair(name, primary, bootstrap)
-        model_primary = fair_model.get(primary, np.nan)
-        if np.isfinite(model_primary) and np.isfinite(hist_fair):
-            fair_primary = 0.65 * model_primary + 0.35 * hist_fair
-            fair_source = f"65%模型+35%{hist_source}"
-        elif np.isfinite(model_primary):
-            fair_primary, fair_source = model_primary, model_note
-        else:
-            fair_primary, fair_source = hist_fair, hist_source
-
-        # Ratio from primary metric plus secondary PB where relevant.
-        current_primary = m.get(primary, np.nan)
-        ratios: list[tuple[float, float]] = []
-        if np.isfinite(current_primary) and np.isfinite(fair_primary) and fair_primary > 0:
-            ratios.append((current_primary / fair_primary, 0.8))
-        if np.isfinite(m.get("pb", np.nan)) and np.isfinite(fair_model.get("pb", np.nan)) and fair_model["pb"] > 0:
-            ratios.append((m["pb"] / fair_model["pb"], 0.2))
-        value_ratio = _geomean_ratio(ratios)
-        deviation = value_ratio - 1 if np.isfinite(value_ratio) else np.nan
-
-        resolved_names = ";".join(f"{r.kind}:{r.board_name}" for r in resolved)
-        return {
-            "entity": name, "type": "sector", "model": c["model"], "resolved_boards": resolved_names,
-            **m, "primary_metric": primary, "current_primary": current_primary,
-            "fair_primary": fair_primary, "fair_source": fair_source, "value_deviation": deviation,
-            "valuation_label": valuation_label(deviation), "model_note": model_note,
-        }
-
-    def _stock_history_median(self, code: str, metric: str) -> float:
-        h = self.p.stock_history_indicator(code)
-        if h.empty:
-            return np.nan
-        candidates = {
-            "pe": ["pe_ttm", "pe"], "pb": ["pb"], "ps": ["ps_ttm", "ps"]
-        }.get(metric, [metric])
-        col = next((c for c in candidates if c in h.columns), None)
-        if not col:
-            return np.nan
-        s = pd.to_numeric(h[col], errors="coerce")
-        s = s[(s > 0) & np.isfinite(s)]
-        return float(s.tail(750).median()) if len(s) >= 30 else np.nan
-
-    def _blend_stock_fair(self, code: str, metric: str, model_value: float) -> tuple[float, str]:
-        hist = self._stock_history_median(code, metric)
-        if np.isfinite(model_value) and model_value > 0 and np.isfinite(hist) and hist > 0:
-            return 0.60 * model_value + 0.40 * hist, f"60%基本面模型+40%个股近3年{metric.upper()}历史中位数"
-        if np.isfinite(model_value) and model_value > 0:
-            return model_value, f"{metric.upper()}基本面模型"
-        if np.isfinite(hist) and hist > 0:
-            return hist, f"个股近3年{metric.upper()}历史中位数"
-        return np.nan, "无有效基准"
-
-    def evaluate_stock(self, code: str, info: dict[str, Any]) -> dict[str, Any]:
-        x = self.master[self.master["code"] == code]
-        if x.empty:
-            return {"entity": info.get("name", code), "code": code, "type": "stock", "error": "股票不存在或无行情"}
-        r = x.iloc[0]
-        sector = info.get("sector")
-        c = self.cfg["sectors"].get(sector)
-        if c is None:
-            c = dict(self.cfg.get("fallback_stock_model", {
-                "model": "growth_pe", "target_peg": 1.45, "growth_floor_pct": 8, "growth_cap_pct": 25,
-                "fair_pe_floor": 20, "fair_pe_cap": 42, "bootstrap_metric": "pe", "bootstrap_fair": np.nan
-            }))
-        if np.isfinite(r["pe_ttm_calc"]) and float(r["pe_ttm_calc"]) > 0:
-            pe_value = float(r["pe_ttm_calc"])
-        elif pd.isna(r["ttm_profit"]) and np.isfinite(r["pe_dynamic"]) and float(r["pe_dynamic"]) > 0:
-            # Only use the quote-provider PE when TTM profit itself is missing.
-            # A known loss must never be converted into a seemingly cheap PE.
-            pe_value = float(r["pe_dynamic"])
-        else:
-            pe_value = np.nan
-        m = {
-            "pe": pe_value,
-            "pb": float(r["pb"]), "ps": float(r["ps_ttm_calc"]),
-            "revenue_growth": float(r["revenue_yoy_cur"]) / 100 if np.isfinite(r["revenue_yoy_cur"]) else np.nan,
-            "profit_growth": float(r["profit_yoy_cur"]) / 100 if np.isfinite(r["profit_yoy_cur"]) else np.nan,
-            "roe_h1_pct": float(r["roe_h1_pct_cur"]) if np.isfinite(r["roe_h1_pct_cur"]) else np.nan,
-            "profitable_mcap_coverage": 1.0 if r["ttm_profit"] > 0 else 0.0,
-        }
-        fair_model, model_note = self._model_fair(info.get("name", code), c, m)
-        configured_primary = c.get("bootstrap_metric", "pe")
-
-        # Utility stocks require two valuation lenses.  PE is invalid when TTM
-        # earnings <= 0, so automatically fall back to PB rather than treating
-        # a negative PE as "cheap".
-        ratios: list[tuple[float, float]] = []
-        fair_by_metric: dict[str, float] = {}
-        source_by_metric: dict[str, str] = {}
-        if c.get("model") == "utility":
-            for metric, weight in (("pe", 0.65), ("pb", 0.35)):
-                current_metric = m.get(metric, np.nan)
-                model_metric = fair_model.get(metric, np.nan)
-                fair_metric, fair_src = self._blend_stock_fair(code, metric, model_metric)
-                fair_by_metric[metric] = fair_metric
-                source_by_metric[metric] = fair_src
-                if np.isfinite(current_metric) and current_metric > 0 and np.isfinite(fair_metric) and fair_metric > 0:
-                    ratios.append((current_metric / fair_metric, weight))
-            primary = "pe" if np.isfinite(m["pe"]) and m["pe"] > 0 else "pb"
-            current = m[primary]
-            fair = fair_by_metric.get(primary, np.nan)
-            fair_source = source_by_metric.get(primary, "无有效基准")
-            value_ratio = _geomean_ratio(ratios)
-            deviation = value_ratio - 1 if np.isfinite(value_ratio) else np.nan
-        else:
-            primary = configured_primary
-            current = m.get(primary, np.nan)
-            model_value = fair_model.get(primary, np.nan)
-            fair, fair_source = self._blend_stock_fair(code, primary, model_value)
-            deviation = current / fair - 1 if np.isfinite(current) and current > 0 and np.isfinite(fair) and fair > 0 else np.nan
-
-        # Growth-quality gate: a historically cheap multiple is not enough if
-        # current earnings are deteriorating.
-        gate = "通过"
-        pg = m["profit_growth"]
-        rg = m["revenue_growth"]
-        if (np.isfinite(pg) and pg < -0.10) or (np.isfinite(rg) and rg < -0.10):
-            gate = "不通过-业绩下滑"
-        elif np.isfinite(pg) and pg < 0:
-            gate = "观察-利润未增长"
-        elif np.isfinite(pg) and pg < 0.08:
-            gate = "观察-利润增长偏弱"
-
-        return {
-            "entity": info.get("name", str(r["name"])), "code": code, "type": "stock", "sector": sector,
-            "price": r["price"], "market_cap": r["market_cap"], "pe": m["pe"], "pb": m["pb"], "ps": m["ps"],
-            "revenue_growth": m["revenue_growth"], "profit_growth": m["profit_growth"], "roe_h1_pct": m["roe_h1_pct"],
-            "primary_metric": primary, "current_primary": current, "fair_primary": fair,
-            "fair_source": fair_source, "value_deviation": deviation, "valuation_label": valuation_label(deviation),
-            "growth_gate": gate, "model_note": model_note, "stock_source": info.get("source", "config"),
-            "fair_pe": fair_by_metric.get("pe", fair if primary == "pe" else np.nan),
-            "fair_pb": fair_by_metric.get("pb", fair if primary == "pb" else np.nan),
-        }
-
-    def save_snapshots(self, sector_rows: list[dict[str, Any]]) -> Path:
-        """Persist one valuation observation per sector per Shanghai calendar day.
-
-        Re-running a notebook many times on the same day must not manufacture
-        enough "history" to satisfy history_min_points. The latest run of the
-        day replaces the previous same-day observation.
-        """
-        p = self.state_dir / "valuation_snapshots.csv"
-        try:
-            now_dt = datetime.now(ZoneInfo("Asia/Shanghai"))
-        except Exception:  # pragma: no cover
-            now_dt = datetime.now().astimezone()
-        now = now_dt.isoformat(timespec="seconds")
-        day = now_dt.date().isoformat()
-        rows = []
-        for r in sector_rows:
-            if r.get("error"):
-                continue
-            rows.append({
-                "timestamp": now, "date": day, "entity": r["entity"],
-                "pe": r.get("pe"), "pb": r.get("pb"), "ps": r.get("ps")
-            })
-        new = pd.DataFrame(rows)
-        if p.exists():
-            old = pd.read_csv(p)
-            if "date" not in old.columns and "timestamp" in old.columns:
-                old["date"] = pd.to_datetime(old["timestamp"], errors="coerce").dt.date.astype("string")
-            if len(new):
-                entities = set(new["entity"].astype(str))
-                old = old[~((old["date"].astype(str) == day) & old["entity"].astype(str).isin(entities))]
-            new = pd.concat([old, new], ignore_index=True)
-        new.to_csv(p, index=False, encoding="utf-8-sig")
-        return p
-
-
-class ValuationEngine(_LegacyValuationEngine):
-    """Risk-aware valuation pipeline with provenance, uncertainty and position policy."""
+class ValuationEngine:
+    """Risk-aware, confidence-aware valuation pipeline."""
 
     def __init__(self, provider: ValuationDataProvider, config: dict[str, Any], state_dir: Path):
         self.p = provider
@@ -887,6 +558,7 @@ class ValuationEngine(_LegacyValuationEngine):
             if "quote_trade_date" in self.master and self.master["quote_trade_date"].notna().any()
             else ValuationDataProvider.latest_trade_date()
         )
+
         shares = np.where(
             (self.master["market_cap"] > 0) & (self.master["price"] > 0),
             self.master["market_cap"] / self.master["price"], np.nan,
@@ -901,10 +573,12 @@ class ValuationEngine(_LegacyValuationEngine):
             self.master["ttm_eps"].notna(), "TTM_ATTRIBUTABLE_PROFIT_DIV_CURRENT_SHARES", "MISSING"
         )
         self.master["ttm_eps_confidence"] = np.where(
-            self.master["ttm_eps"].notna(), np.minimum(self.master["ttm_profit_confidence"].fillna(0.0), 0.90), 0.0
+            self.master["ttm_eps"].notna(),
+            np.minimum(self.master.get("ttm_profit_confidence", 0.0), 0.90), 0.0,
         )
         if "ttm_operating_cashflow" not in self.master:
             self.master["ttm_operating_cashflow"] = np.nan
+        if "ttm_operating_cashflow_confidence" not in self.master:
             self.master["ttm_operating_cashflow_confidence"] = 0.0
         exact_ocfps = self.master["ttm_operating_cashflow"] / self.master["shares_outstanding"]
         exact_ocfps = exact_ocfps.where(
@@ -944,27 +618,53 @@ class ValuationEngine(_LegacyValuationEngine):
         )
         self.master["ttm_roe_method"] = np.where(
             average_equity.notna(), "TTM_ATTRIBUTABLE_NI_OVER_AVERAGE_PARENT_EQUITY",
-            np.where(self.master["ttm_roe_pct"].notna(), "TTM_ATTRIBUTABLE_NI_OVER_CURRENT_EQUITY_PROXY", "ANNUALIZED_REPORTED_ROE"),
+            np.where(
+                self.master["ttm_roe_pct"].notna(),
+                "TTM_ATTRIBUTABLE_NI_OVER_CURRENT_EQUITY_PROXY", "ANNUALIZED_REPORTED_ROE",
+            ),
         )
-        fallback_roe = self.master["roe_h1_pct_cur"] * self.roe_annualization_factor
-        self.master["ttm_roe_pct"] = self.master["ttm_roe_pct"].where(self.master["ttm_roe_pct"].notna(), fallback_roe)
+        fallback_roe = self.master.get("roe_h1_pct_cur", pd.Series(np.nan, index=self.master.index)) * self.roe_annualization_factor
+        self.master["ttm_roe_pct"] = self.master["ttm_roe_pct"].where(
+            self.master["ttm_roe_pct"].notna(), fallback_roe
+        )
+        profit_conf_series = self.master.get("ttm_profit_confidence", pd.Series(0.0, index=self.master.index)).fillna(0.0)
         self.master["ttm_roe_confidence"] = np.where(
             self.master["ttm_roe_method"] == "TTM_ATTRIBUTABLE_NI_OVER_AVERAGE_PARENT_EQUITY",
-            np.minimum(self.master["ttm_profit_confidence"].fillna(0.0), 0.90),
-            np.minimum(self.master["ttm_profit_confidence"].fillna(0.0), 0.45),
+            np.minimum(profit_conf_series, 0.90),
+            np.minimum(profit_conf_series, 0.45),
         )
         shares_series = self.master["shares_outstanding"]
-        self.master["shares_proxy"] = shares_series  # compatibility alias with corrected basis
+        self.master["shares_proxy"] = shares_series
         self.master["sps_ttm"] = self.master["ttm_revenue"] / shares_series
         self.master["bvps"] = (pd.Series(book, index=self.master.index) / shares_series).where(shares_series > 0)
         self.master["cash_conversion"] = np.where(
             (self.master["ttm_profit"] > 0) & self.master["ttm_operating_cashflow"].notna(),
             self.master["ttm_operating_cashflow"] / self.master["ttm_profit"],
-            np.where((self.master["ttm_eps"] > 0) & self.master["ttm_ocfps"].notna(), self.master["ttm_ocfps"] / self.master["ttm_eps"], np.nan),
+            np.where(
+                (self.master["ttm_eps"] > 0) & self.master["ttm_ocfps"].notna(),
+                self.master["ttm_ocfps"] / self.master["ttm_eps"], np.nan,
+            ),
         )
-        self.master["gross_margin_trend_pct"] = self.master["gross_margin_pct_cur"] - self.master["gross_margin_pct_pri"]
-        self.master["roe_trend_pct"] = self.master["roe_h1_pct_cur"] - self.master["roe_h1_pct_pri"]
+        gross_cur = self.master.get("gross_margin_pct_cur", pd.Series(np.nan, index=self.master.index))
+        gross_pri = self.master.get("gross_margin_pct_pri", pd.Series(np.nan, index=self.master.index))
+        roe_cur = self.master.get("roe_h1_pct_cur", pd.Series(np.nan, index=self.master.index))
+        roe_pri = self.master.get("roe_h1_pct_pri", pd.Series(np.nan, index=self.master.index))
+        self.master["gross_margin_trend_pct"] = gross_cur - gross_pri
+        self.master["roe_trend_pct"] = roe_cur - roe_pri
         self._history_cache: dict[tuple[str, str], HistoryStats] = {}
+
+    @staticmethod
+    def _mcap_confidence(x: pd.DataFrame, value_col: str, confidence_col: str, total_mv: float) -> float:
+        if total_mv <= 0 or value_col not in x:
+            return 0.0
+        valid = x[x[value_col].notna()].copy()
+        if valid.empty:
+            return 0.0
+        if confidence_col in valid:
+            conf = pd.to_numeric(valid[confidence_col], errors="coerce").fillna(0.0).clip(0, 1)
+        else:
+            conf = pd.Series(1.0, index=valid.index)
+        return float((valid["market_cap"] * conf).sum() / total_mv)
 
     def _aggregate(self, universe: pd.DataFrame) -> dict[str, float | str]:
         x = universe[["code"]].drop_duplicates().merge(self.master, on="code", how="left")
@@ -972,69 +672,135 @@ class ValuationEngine(_LegacyValuationEngine):
         total_mv = float(x["market_cap"].sum())
         if total_mv <= 0:
             return {"constituents": 0, "data_coverage": 0.0}
-        pos = x[x["ttm_profit"] > 0]
-        profit_valid = x[x["ttm_profit"].notna()]
-        total_profit = float(profit_valid["ttm_profit"].sum())
+
+        # PE: numerator and denominator must use the same profit-available sample.
+        profit_valid = x[x["ttm_profit"].notna()].copy()
+        pos = profit_valid[profit_valid["ttm_profit"] > 0]
+        profit_valid_mv = float(profit_valid["market_cap"].sum())
+        total_profit = float(profit_valid["ttm_profit"].sum()) if len(profit_valid) else np.nan
         positive_profit_pe = (
             float(pos["market_cap"].sum() / pos["ttm_profit"].sum())
             if len(pos) and pos["ttm_profit"].sum() > 0 else np.nan
         )
-        aggregate_pe = total_mv / total_profit if total_profit > 0 else np.nan
+        aggregate_pe = profit_valid_mv / total_profit if np.isfinite(total_profit) and total_profit > 0 else np.nan
         profitable_coverage = float(pos["market_cap"].sum() / total_mv)
+        ttm_profit_cov = float(profit_valid_mv / total_mv)
         loss_mcap_share = float(x.loc[x["ttm_profit"] <= 0, "market_cap"].sum() / total_mv)
 
-        ps_x = x[(x["ttm_revenue"] > 0) & x["ttm_revenue"].notna()]
+        ps_x = x[(x["ttm_revenue"] > 0) & x["ttm_revenue"].notna()].copy()
         ps = float(ps_x["market_cap"].sum() / ps_x["ttm_revenue"].sum()) if len(ps_x) else np.nan
-        total_revenue = float(ps_x["ttm_revenue"].sum()) if len(ps_x) else np.nan
         ps_cov = float(ps_x["market_cap"].sum() / total_mv)
+
         pb_x = x[(x["pb"] > 0) & x["pb"].notna()].copy()
         book = (pb_x["market_cap"] / pb_x["pb"]).sum()
         pb = float(pb_x["market_cap"].sum() / book) if book > 0 else np.nan
         pb_cov = float(pb_x["market_cap"].sum() / total_mv)
 
-        both_rev = x[(x["revenue_cur"] > 0) & (x["revenue_pri"] > 0)]
+        both_rev = x[(x["revenue_cur"] > 0) & (x["revenue_pri"] > 0)].copy()
         rev_growth = both_rev["revenue_cur"].sum() / both_rev["revenue_pri"].sum() - 1 if len(both_rev) else np.nan
-        both_p = x[x["net_profit_pri"].notna() & x["net_profit_cur"].notna()]
+        both_p = x[x["net_profit_pri"].notna() & x["net_profit_cur"].notna()].copy()
         prior_profit = both_p["net_profit_pri"].sum()
         current_profit = both_p["net_profit_cur"].sum()
         profit_growth = current_profit / prior_profit - 1 if prior_profit > 0 else np.nan
-        ttm_profit = x["ttm_profit"].sum(min_count=1)
-        ttm_ocf = x["ttm_operating_cashflow"].sum(min_count=1) if "ttm_operating_cashflow" in x else np.nan
-        total_book = (pb_x["market_cap"] / pb_x["pb"]).sum(min_count=1)
-        roe_ttm = float(ttm_profit / total_book * 100) if total_book > 0 and np.isfinite(ttm_profit) else np.nan
-        gross = float(np.nanmedian(x["gross_margin_pct_cur"])) if x["gross_margin_pct_cur"].notna().any() else np.nan
+
+        # Net margin uses the same companies in numerator and denominator.
+        margin_x = x[(x["ttm_revenue"] > 0) & x["ttm_profit"].notna()].copy()
+        margin_revenue = margin_x["ttm_revenue"].sum(min_count=1)
+        margin_profit = margin_x["ttm_profit"].sum(min_count=1)
+        net_margin = float(margin_profit / margin_revenue) if margin_revenue > 0 else np.nan
+        net_margin_cov = float(margin_x["market_cap"].sum() / total_mv)
+
+        # OCF: both yield and coverage use the OCF-available sample. Never divide
+        # partial OCF by the whole sector market cap.
+        ocf_x = x[x["ttm_operating_cashflow"].notna()].copy() if "ttm_operating_cashflow" in x else x.iloc[0:0]
+        ocf_mv = float(ocf_x["market_cap"].sum()) if len(ocf_x) else 0.0
+        ttm_ocf = float(ocf_x["ttm_operating_cashflow"].sum()) if len(ocf_x) else np.nan
+        ocf_yield = float(ttm_ocf / ocf_mv) if ocf_mv > 0 and np.isfinite(ttm_ocf) else np.nan
+        ocf_cov = float(ocf_mv / total_mv)
+        cash_x = x[x["ttm_operating_cashflow"].notna() & x["ttm_profit"].notna()].copy()
+        cash_profit = cash_x["ttm_profit"].sum(min_count=1)
+        cash_conversion = (
+            float(cash_x["ttm_operating_cashflow"].sum(min_count=1) / cash_profit)
+            if np.isfinite(cash_profit) and cash_profit > 0 else np.nan
+        )
+
+        # ROE also uses matched profit/book samples.
+        roe_x = x[(x["pb"] > 0) & x["pb"].notna() & x["ttm_profit"].notna()].copy()
+        roe_book = (roe_x["market_cap"] / roe_x["pb"]).sum(min_count=1)
+        roe_profit = roe_x["ttm_profit"].sum(min_count=1)
+        roe_ttm = float(roe_profit / roe_book * 100) if roe_book > 0 and np.isfinite(roe_profit) else np.nan
+        roe_cov = float(roe_x["market_cap"].sum() / total_mv)
+
+        gross_col = x.get("gross_margin_pct_cur", pd.Series(np.nan, index=x.index))
+        gross = float(np.nanmedian(gross_col)) if gross_col.notna().any() else np.nan
         ttm_revenue_cov = float(x.loc[x["ttm_revenue"].notna(), "market_cap"].sum() / total_mv)
-        ttm_profit_cov = float(x.loc[x["ttm_profit"].notna(), "market_cap"].sum() / total_mv)
         rev_growth_cov = float(both_rev["market_cap"].sum() / total_mv)
         profit_growth_cov = float(both_p["market_cap"].sum() / total_mv)
         data_cov = min(ttm_revenue_cov, ttm_profit_cov, rev_growth_cov, profit_growth_cov)
+
         min_pe_cov = float(self.cfg.get("valuation_policy", {}).get("min_profitable_mcap_coverage", 0.70))
         pe = aggregate_pe if profitable_coverage >= min_pe_cov else np.nan
+        pe_conf = self._mcap_confidence(x, "ttm_profit", "ttm_profit_confidence", total_mv)
+        ps_conf = self._mcap_confidence(x, "ttm_revenue", "ttm_revenue_confidence", total_mv)
+        ocf_conf = self._mcap_confidence(x, "ttm_operating_cashflow", "ttm_operating_cashflow_confidence", total_mv)
+        roe_conf = self._mcap_confidence(x, "ttm_roe_pct", "ttm_roe_confidence", total_mv)
+        if not np.isfinite(roe_conf) or roe_conf <= 0:
+            roe_conf = roe_cov
+
         return {
             "constituents": len(x), "market_cap": total_mv,
             "pe": pe, "aggregate_pe": aggregate_pe, "positive_profit_pe": positive_profit_pe,
             "pb": pb, "ps": ps, "revenue_growth": rev_growth, "profit_growth": profit_growth,
             "turnaround": bool(prior_profit <= 0 < current_profit),
-            "net_margin": total_profit / total_revenue if total_revenue > 0 else np.nan,
-            "cash_conversion": float(ttm_ocf / ttm_profit) if np.isfinite(ttm_ocf) and ttm_profit > 0 else np.nan,
-            "ttm_operating_cashflow": ttm_ocf,
+            "net_margin": net_margin, "net_margin_mcap_coverage": net_margin_cov,
+            "cash_conversion": cash_conversion,
+            "ttm_operating_cashflow": ttm_ocf, "ocf_yield": ocf_yield,
             "roe_ttm_pct": roe_ttm, "roe_h1_pct": roe_ttm, "gross_margin_pct": gross,
             "profitable_mcap_coverage": profitable_coverage, "loss_mcap_share": loss_mcap_share,
-            "pe_mcap_coverage": profitable_coverage, "pb_mcap_coverage": pb_cov, "ps_mcap_coverage": ps_cov,
-            "pe_metric_source": "aggregate earnings incl. losses" if np.isfinite(pe) else "DISABLED_LOW_PROFITABLE_COVERAGE",
-            "pb_metric_source": "market-cap weighted aggregate book value",
-            "ps_metric_source": "market-cap weighted positive-revenue constituents",
-            "pe_metric_confidence": profitable_coverage if np.isfinite(pe) else 0.0,
-            "pb_metric_confidence": pb_cov, "ps_metric_confidence": ps_cov,
+            "pe_mcap_coverage": ttm_profit_cov, "pb_mcap_coverage": pb_cov, "ps_mcap_coverage": ps_cov,
+            "ocf_mcap_coverage": ocf_cov, "roe_mcap_coverage": roe_cov,
+            "pe_metric_source": "matched-market-cap / aggregate earnings incl. losses" if np.isfinite(pe) else "DISABLED_LOW_PROFITABLE_COVERAGE",
+            "pb_metric_source": "matched market-cap / aggregate book value",
+            "ps_metric_source": "matched market-cap / positive revenue",
+            "ocf_metric_source": "matched OCF sample yield",
+            "pe_metric_confidence": pe_conf if np.isfinite(pe) else 0.0,
+            "pb_metric_confidence": min(pb_cov, roe_conf),
+            "ps_metric_confidence": ps_conf,
+            "ocf_metric_confidence": ocf_conf,
             "data_coverage": data_cov, "ttm_revenue_coverage": ttm_revenue_cov,
             "ttm_profit_coverage": ttm_profit_cov, "revenue_growth_coverage": rev_growth_cov,
             "profit_growth_coverage": profit_growth_cov,
         }
 
     @staticmethod
+    def _normalized_growth_pct(m: dict[str, float], c: dict[str, Any] | None = None) -> float:
+        """Compatibility helper retained for existing tests/callers."""
+        rg = m.get("revenue_growth", np.nan) * 100
+        pg = m.get("profit_growth", np.nan) * 100
+        c = c or {}
+        if np.isfinite(pg) and np.isfinite(rg):
+            premium_cap = c.get("profit_growth_premium_cap_pct")
+            if premium_cap is not None and np.isfinite(float(premium_cap)):
+                pg = min(pg, rg + float(premium_cap))
+            return 0.65 * _clip(pg, -30, 80) + 0.35 * _clip(rg, -30, 60)
+        if np.isfinite(pg):
+            return _clip(pg, -30, 80)
+        return _clip(rg, -30, 60) if np.isfinite(rg) else np.nan
+
+    @staticmethod
     def _growth_diagnostics(m: dict[str, Any], c: dict[str, Any]) -> dict[str, Any]:
         raw_revenue = float(m.get("revenue_growth", np.nan)) * 100
         raw_profit = float(m.get("profit_growth", np.nan)) * 100
+        min_cov = float(m.get("_min_growth_coverage", 0.0))
+        rev_cov = float(m.get("revenue_growth_coverage", 1.0 if np.isfinite(raw_revenue) else 0.0))
+        profit_cov = float(m.get("profit_growth_coverage", 1.0 if np.isfinite(raw_profit) else 0.0))
+        revenue_available = np.isfinite(raw_revenue) and rev_cov >= min_cov
+        profit_available = np.isfinite(raw_profit) and profit_cov >= min_cov
+        if not revenue_available:
+            raw_revenue = np.nan
+        if not profit_available:
+            raw_profit = np.nan
+
         turnaround = bool(m.get("turnaround", False))
         low_base = turnaround or (np.isfinite(raw_profit) and abs(raw_profit) >= float(c.get("low_base_threshold_pct", 200)))
         adjusted_profit = raw_profit
@@ -1046,17 +812,22 @@ class ValuationEngine(_LegacyValuationEngine):
             normalized = (0.35 if low_base else 0.65) * _clip(adjusted_profit, -30, 80) + (0.65 if low_base else 0.35) * _clip(raw_revenue, -30, 60)
         elif np.isfinite(adjusted_profit):
             normalized = _clip(adjusted_profit, -30, 80)
+        elif np.isfinite(raw_revenue):
+            normalized = _clip(raw_revenue, -30, 60)
         else:
-            normalized = _clip(raw_revenue, -30, 60) if np.isfinite(raw_revenue) else np.nan
+            normalized = np.nan
         gf, gc = float(c.get("growth_floor_pct", 5)), float(c.get("growth_cap_pct", 40))
-        used = _clip(normalized, gf, gc) if np.isfinite(normalized) else gf
+        used = _clip(normalized, gf, gc) if np.isfinite(normalized) else np.nan
+        regime = "MISSING" if not np.isfinite(normalized) else "TURNAROUND" if turnaround else "LOW_BASE" if low_base else "NORMAL"
         return {
             "raw_profit_growth_pct": raw_profit,
             "raw_revenue_growth_pct": raw_revenue,
             "profit_growth_after_premium_cap_pct": adjusted_profit,
             "normalized_growth_pct": normalized,
             "growth_used_pct": used,
-            "growth_regime": "TURNAROUND" if turnaround else "LOW_BASE" if low_base else "NORMAL",
+            "growth_regime": regime,
+            "revenue_growth_available": revenue_available,
+            "profit_growth_available": profit_available,
         }
 
     def _model_fair(self, name: str, c: dict[str, Any], m: dict[str, float]) -> tuple[dict[str, float], str]:
@@ -1067,34 +838,47 @@ class ValuationEngine(_LegacyValuationEngine):
             diagnostics = self._growth_diagnostics(m, c)
             m.update(diagnostics)
             g_used = float(diagnostics["growth_used_pct"])
-            raw_fair_pe = float(c.get("target_peg", 1.3)) * g_used
-            if model == "cyclical_growth":
-                raw_fair_pe *= float(c.get("cycle_discount", 0.90))
-            if model == "commodity_cycle":
-                raw_fair_pe *= float(c.get("cycle_discount", 0.80))
-            cash = m.get("cash_conversion", np.nan)
-            if model in {"quality_growth", "mature_consumer", "materials_mature"} and np.isfinite(cash):
-                raw_fair_pe *= _clip(0.85 + 0.15 * cash, 0.80, 1.10)
-            pe_floor, pe_cap = float(c["fair_pe_floor"]), float(c["fair_pe_cap"])
-            fair["pe"] = _clip(raw_fair_pe, pe_floor, pe_cap)
-            m["floor_hit"] = bool(raw_fair_pe <= pe_floor)
-            m["cap_hit"] = bool(raw_fair_pe >= pe_cap)
+            # A PE growth anchor requires both profit and revenue growth. Missing
+            # growth is unknown, not the configured growth floor.
+            if diagnostics["revenue_growth_available"] and diagnostics["profit_growth_available"] and np.isfinite(g_used):
+                raw_fair_pe = float(c.get("target_peg", 1.3)) * g_used
+                if model == "cyclical_growth":
+                    raw_fair_pe *= float(c.get("cycle_discount", 0.90))
+                if model == "commodity_cycle":
+                    raw_fair_pe *= float(c.get("cycle_discount", 0.80))
+                cash = m.get("cash_conversion", np.nan)
+                if model in {"quality_growth", "mature_consumer", "materials_mature"} and np.isfinite(cash):
+                    raw_fair_pe *= _clip(0.85 + 0.15 * cash, 0.80, 1.10)
+                pe_floor, pe_cap = float(c["fair_pe_floor"]), float(c["fair_pe_cap"])
+                fair["pe"] = _clip(raw_fair_pe, pe_floor, pe_cap)
+                m["floor_hit"] = bool(raw_fair_pe <= pe_floor)
+                m["cap_hit"] = bool(raw_fair_pe >= pe_cap)
+            else:
+                m["floor_hit"] = False
+                m["cap_hit"] = False
 
-            # PB and PS are independent anchors, never algebraic PE transforms.
             rg = diagnostics["raw_revenue_growth_pct"]
             margin = m.get("net_margin", np.nan)
             roe = m.get("roe_ttm_pct", np.nan) / 100.0
-            if all(k in c for k in ("fair_ps_floor", "fair_ps_cap", "base_ps")):
-                ps_anchor = float(c["base_ps"]) + max(rg if np.isfinite(rg) else 0.0, 0.0) * float(c.get("revenue_growth_ps_slope", .04))
+            # PS needs an observed revenue-growth anchor; do not silently use base_ps
+            # when growth is missing.
+            if (
+                all(k in c for k in ("fair_ps_floor", "fair_ps_cap", "base_ps"))
+                and diagnostics["revenue_growth_available"]
+            ):
+                ps_anchor = float(c["base_ps"]) + max(rg, 0.0) * float(c.get("revenue_growth_ps_slope", .04))
                 if np.isfinite(margin):
                     ps_anchor += (margin - float(c.get("reference_net_margin", .10))) * float(c.get("margin_ps_slope", 6.0))
                 fair["ps"] = _clip(ps_anchor, float(c["fair_ps_floor"]), float(c["fair_ps_cap"]))
-            if all(k in c for k in ("fair_pb_floor", "fair_pb_cap", "base_pb")):
-                pb_anchor = float(c["base_pb"])
-                if np.isfinite(roe):
-                    pb_anchor += max(roe - float(c.get("reference_roe", .08)), -.05) * float(c.get("roe_pb_slope", 8.0))
+            # PB is independent but still needs ROE; base_pb alone is not treated as
+            # current fundamental evidence.
+            if all(k in c for k in ("fair_pb_floor", "fair_pb_cap", "base_pb")) and np.isfinite(roe):
+                pb_anchor = float(c["base_pb"]) + max(
+                    roe - float(c.get("reference_roe", .08)), -.05
+                ) * float(c.get("roe_pb_slope", 8.0))
                 fair["pb"] = _clip(pb_anchor, float(c["fair_pb_floor"]), float(c["fair_pb_cap"]))
-            note = f"{model}: PE增长、PS收入/利润率、PB资产回报独立锚(g={g_used:.1f}%; {diagnostics['growth_regime']})"
+            g_text = f"{g_used:.1f}%" if np.isfinite(g_used) else "MISSING"
+            note = f"{model}: PE增长、PS收入/利润率、PB资产回报独立锚(g={g_text}; {diagnostics['growth_regime']})"
         elif model == "utility":
             roe = m.get("roe_ttm_pct", np.nan) / 100.0
             k, tg = float(c.get("required_return", 0.09)), float(c.get("terminal_growth", 0.03))
@@ -1103,11 +887,14 @@ class ValuationEngine(_LegacyValuationEngine):
             note = "PB-ROE/Gordon（优先平均归母权益）；PE仅展示、不作为独立镜头"
         elif model in {"innovation_drug", "early_growth_ps"}:
             rg = m.get("revenue_growth", np.nan) * 100
-            rg = _clip(rg, -10, 50) if np.isfinite(rg) else 0
-            value = float(c.get("base_ps", 3.0)) + max(rg, 0) * float(c.get("revenue_growth_ps_slope", 0.06))
-            if model == "innovation_drug" and m.get("profit_growth", -1) > 0 and m.get("profitable_mcap_coverage", 0) > 0.6:
-                value += float(c.get("profitable_ps_bonus", 0.8))
-            fair["ps"] = _clip(value, float(c["fair_ps_floor"]), float(c["fair_ps_cap"]))
+            min_cov = float(m.get("_min_growth_coverage", 0.0))
+            rev_cov = float(m.get("revenue_growth_coverage", 1.0 if np.isfinite(rg) else 0.0))
+            if np.isfinite(rg) and rev_cov >= min_cov:
+                rg = _clip(rg, -10, 50)
+                value = float(c.get("base_ps", 3.0)) + max(rg, 0) * float(c.get("revenue_growth_ps_slope", 0.06))
+                if model == "innovation_drug" and m.get("profit_growth", -1) > 0 and m.get("profitable_mcap_coverage", 0) > 0.6:
+                    value += float(c.get("profitable_ps_bonus", 0.8))
+                fair["ps"] = _clip(value, float(c["fair_ps_floor"]), float(c["fair_ps_cap"]))
             note = "PS/收入增长+盈利兑现模型"
         return fair, note
 
@@ -1128,7 +915,10 @@ class ValuationEngine(_LegacyValuationEngine):
         ]
         q = h[(h["entity"].astype(str) == entity) & h[metric].notna()].copy()
         q = prepare_history(q)
-        return summarize_values(q[metric], dates=q.get("trade_date"), source="SELF_SECTOR_SNAPSHOTS", minimum=int(self.cfg.get("history_min_points", 30)))
+        return summarize_values(
+            q[metric], dates=q.get("trade_date"), source="SELF_SECTOR_SNAPSHOTS",
+            minimum=int(self.cfg.get("history_min_points", 30)),
+        )
 
     def _stock_metric_history(self, code: str, metric: str) -> HistoryStats:
         key = (code, metric)
@@ -1148,13 +938,19 @@ class ValuationEngine(_LegacyValuationEngine):
             q = prepare_history(h).tail(750)
             values = pd.to_numeric(q[col], errors="coerce")
             q = q[(values > 0) & np.isfinite(values)].copy()
-            values = pd.to_numeric(q[col], errors="coerce")
-            stats = summarize_values(values, dates=q.get("trade_date"), source=source, minimum=int(self.cfg.get("history_min_points", 30)))
+            stats = summarize_values(
+                pd.to_numeric(q[col], errors="coerce"), dates=q.get("trade_date"), source=source,
+                minimum=int(self.cfg.get("history_min_points", 30)),
+            )
         self._history_cache[key] = stats
         return stats
 
     def _blend_multiple(self, code: str, metric: str, model_value: float) -> tuple[float, str, HistoryStats, float]:
         stats = self._stock_metric_history(code, metric)
+        # Independent fundamental anchor is mandatory. History may shrink an anchor,
+        # but history alone must not resurrect a missing PE/PB/PS model.
+        if not (np.isfinite(model_value) and model_value > 0):
+            return np.nan, f"missing independent {metric.upper()} anchor; {stats.status}", stats, 0.0
         kappa = float(self.cfg.get("valuation_policy", {}).get("history_shrinkage_kappa", 60))
         value, weight = shrink_log_value(model_value, stats, kappa)
         source = f"log-shrinkage model/history; w_hist={weight:.3f}; {stats.status}"
@@ -1203,60 +999,75 @@ class ValuationEngine(_LegacyValuationEngine):
         m = self._aggregate(u)
         configured_primary = str(c.get("bootstrap_metric", "pe"))
         min_cov = float(c.get("min_data_coverage", self.cfg.get("report_policy", {}).get("min_sector_data_coverage", .75)))
-        fair_model, note = self._model_fair(name, c, m) if m.get("data_coverage", 0) >= min_cov else ({"pe": np.nan, "pb": np.nan, "ps": np.nan}, "数据覆盖不足")
+        m["_min_growth_coverage"] = min_cov
+        fair_model, note = self._model_fair(name, c, m)
         weights = self._model_weights(c)
         total_weight = sum(weights.values())
         min_metric_cov = float(self.cfg.get("valuation_policy", {}).get("min_metric_mcap_coverage", .70))
         ratios: list[tuple[float, float, str]] = []
+        raw_effective_weights: dict[str, float] = {}
         history_by_metric: dict[str, HistoryStats] = {}
         fair_by_metric: dict[str, float] = {"pe": np.nan, "pb": np.nan, "ps": np.nan}
         history_weight_by_metric: dict[str, float] = {}
         drop_reasons: dict[str, str] = {}
         bootstrap_weight, bootstrap_age = self._bootstrap_weight(c)
+
         for metric, configured_weight in weights.items():
             if metric == "ocf_yield":
-                current_ocf_yield = (
-                    float(m["ttm_operating_cashflow"] / m["market_cap"])
-                    if np.isfinite(m.get("ttm_operating_cashflow", np.nan)) and m["ttm_operating_cashflow"] > 0 else np.nan
-                )
+                current_ocf_yield = float(m.get("ocf_yield", np.nan))
+                coverage = float(m.get("ocf_mcap_coverage", 0.0))
+                metric_conf = float(m.get("ocf_metric_confidence", 0.0))
                 target_yield = float(c.get("target_ocf_yield", .06))
-                if current_ocf_yield > 0 and target_yield > 0:
-                    ratios.append((target_yield / current_ocf_yield, configured_weight, "OCF_YIELD_PROXY"))
-                else:
-                    drop_reasons[metric] = "missing_positive_sector_ocf"
+                if not (np.isfinite(current_ocf_yield) and current_ocf_yield > 0 and coverage >= min_metric_cov):
+                    drop_reasons[metric] = f"invalid_current_or_coverage<{min_metric_cov:.0%}"
+                    continue
+                effective_weight = configured_weight * max(0.0, min(1.0, metric_conf))
+                if effective_weight <= 0 or target_yield <= 0:
+                    drop_reasons[metric] = "missing_positive_sector_ocf_or_confidence"
+                    continue
+                ratios.append((target_yield / current_ocf_yield, effective_weight, "OCF_YIELD_PROXY"))
+                raw_effective_weights[metric] = effective_weight
                 continue
+
             current = float(m.get(metric, np.nan))
             coverage = float(m.get(f"{metric}_mcap_coverage", 0.0))
+            metric_conf = float(m.get(f"{metric}_metric_confidence", 0.0))
+            model_value = float(fair_model.get(metric, np.nan))
             if not (np.isfinite(current) and current > 0 and coverage >= min_metric_cov):
                 drop_reasons[metric] = f"invalid_current_or_coverage<{min_metric_cov:.0%}"
                 continue
+            if not (np.isfinite(model_value) and model_value > 0):
+                drop_reasons[metric] = "missing_independent_fair_anchor"
+                continue
             history = self._sector_history(name, metric, universe_hash)
             history_by_metric[metric] = history
-            model_value = float(fair_model.get(metric, np.nan))
             if history.status == "OK":
-                fair, hist_weight = shrink_log_value(model_value, history, float(self.cfg.get("valuation_policy", {}).get("history_shrinkage_kappa", 60)))
+                fair, hist_weight = shrink_log_value(
+                    model_value, history,
+                    float(self.cfg.get("valuation_policy", {}).get("history_shrinkage_kappa", 60)),
+                )
             elif metric == configured_primary and pd.notna(pd.to_numeric(c.get("bootstrap_fair"), errors="coerce")) and bootstrap_weight > 0:
                 bootstrap = float(c["bootstrap_fair"])
-                if np.isfinite(model_value) and model_value > 0:
-                    fair = math.exp((1 - bootstrap_weight) * math.log(model_value) + bootstrap_weight * math.log(bootstrap))
-                else:
-                    fair = bootstrap
+                fair = math.exp((1 - bootstrap_weight) * math.log(model_value) + bootstrap_weight * math.log(bootstrap))
                 hist_weight = bootstrap_weight
             else:
                 fair, hist_weight = model_value, 0.0
             fair_by_metric[metric] = fair
             history_weight_by_metric[metric] = hist_weight
-            if np.isfinite(fair) and fair > 0:
-                ratios.append((current / fair, configured_weight, metric.upper()))
+            effective_weight = configured_weight * max(0.0, min(1.0, metric_conf))
+            if np.isfinite(fair) and fair > 0 and effective_weight > 0:
+                ratios.append((current / fair, effective_weight, metric.upper()))
+                raw_effective_weights[metric] = effective_weight
             else:
-                drop_reasons[metric] = "missing_independent_fair_anchor"
-        valid_weight = sum(weight for _, weight, _ in ratios)
-        coverage = valid_weight / total_weight if total_weight > 0 else 0.0
+                drop_reasons[metric] = "missing_fair_or_confidence"
+
+        effective_sum = sum(raw_effective_weights.values())
+        confidence_coverage = effective_sum / total_weight if total_weight > 0 else 0.0
         ratio_center, disagreement, models_used = weighted_geometric_price(ratios)
         deviation = ratio_center - 1 if np.isfinite(ratio_center) else np.nan
         required = float(self.cfg.get("valuation_policy", {}).get("required_model_weight_coverage", .70))
-        status = "OK" if np.isfinite(deviation) and m.get("data_coverage", 0) >= min_cov and coverage >= required else (
-            "LOW_MODEL_COVERAGE" if coverage < required else "INSUFFICIENT_DATA"
+        status = "OK" if np.isfinite(deviation) and confidence_coverage >= required else (
+            "LOW_MODEL_COVERAGE" if confidence_coverage < required else "INSUFFICIENT_DATA"
         )
         primary = configured_primary if configured_primary in fair_by_metric else next(iter(weights), configured_primary)
         primary_history = history_by_metric.get(primary, HistoryStats(status="NOT_USED", source="NONE"))
@@ -1268,7 +1079,7 @@ class ValuationEngine(_LegacyValuationEngine):
             "primary_metric": primary, "configured_primary_metric": configured_primary,
             "current_primary": m.get(primary, np.nan), "fair_primary": fair_by_metric.get(primary, np.nan),
             "fair_pe": fair_by_metric["pe"], "fair_pb": fair_by_metric["pb"], "fair_ps": fair_by_metric["ps"],
-            "models_used": ";".join(models_used), "model_weight_coverage": coverage,
+            "models_used": ";".join(models_used), "model_weight_coverage": confidence_coverage,
             "model_disagreement": disagreement, "multiple_deviation": deviation,
             "valuation_label": valuation_label(deviation), "valuation_status": status,
             "history_status": primary_history.status, "history_points": primary_history.points,
@@ -1276,12 +1087,17 @@ class ValuationEngine(_LegacyValuationEngine):
             "history_source": primary_history.source, "history_confidence": primary_history.confidence,
             "history_weight": history_weight_by_metric.get(primary, 0.0),
             "bootstrap_age_days": bootstrap_age, "bootstrap_weight": bootstrap_weight if primary == configured_primary else 0.0,
-            "fair_source": "independent multi-lens + versioned history", "model_note": note,
-            "quote_trade_date": self.quote_trade_date,
+            "fair_source": "independent multi-lens + confidence-weighted data + versioned history",
+            "model_note": note, "quote_trade_date": self.quote_trade_date,
         }
         for metric, weight in weights.items():
             result[f"configured_weight_{metric}"] = weight
-            result[f"effective_weight_{metric}"] = weight / valid_weight if any(name == ("OCF_YIELD_PROXY" if metric == "ocf_yield" else metric.upper()) for _, _, name in ratios) and valid_weight else 0.0
+            result[f"model_confidence_{metric}"] = (
+                raw_effective_weights.get(metric, 0.0) / weight if weight > 0 else 0.0
+            )
+            result[f"effective_weight_{metric}"] = (
+                raw_effective_weights.get(metric, 0.0) / effective_sum if effective_sum > 0 else 0.0
+            )
             result[f"model_drop_reason_{metric}"] = drop_reasons.get(metric, "")
         return result
 
@@ -1292,13 +1108,17 @@ class ValuationEngine(_LegacyValuationEngine):
                 return "观察-公用事业利润显著下滑"
             return "通过-公用事业阈值"
         if model == "cyclical_growth":
+            if not (np.isfinite(revenue_growth) and np.isfinite(profit_growth)):
+                return "不通过-增长数据缺失"
             if np.isfinite(cash_conversion) and cash_conversion < 0:
                 return "不通过-周期利润现金背离"
             return "通过-周期正常化判断"
+        if not (np.isfinite(revenue_growth) and np.isfinite(profit_growth)):
+            return "不通过-增长数据缺失"
         threshold = 0.10 if model in {"growth_pe", "quality_growth", "early_growth_ps", "innovation_drug"} else 0.03
-        if (np.isfinite(profit_growth) and profit_growth < -0.10) or (np.isfinite(revenue_growth) and revenue_growth < -0.10):
+        if profit_growth < -0.10 or revenue_growth < -0.10:
             return "不通过-业绩下滑"
-        if np.isfinite(profit_growth) and profit_growth < threshold:
+        if profit_growth < threshold:
             return "观察-低于模型族增长阈值"
         return "通过"
 
@@ -1317,18 +1137,21 @@ class ValuationEngine(_LegacyValuationEngine):
         ]
         q = h[(h["code"].astype(str).str.zfill(6) == code) & h["valuation_residual"].notna()].copy()
         q = prepare_history(q)
-        return summarize_values(q["valuation_residual"], dates=q.get("trade_date"), source="POINT_IN_TIME_STOCK_SNAPSHOTS", minimum=int(self.cfg.get("history_min_points", 30)))
+        return summarize_values(
+            q["valuation_residual"], dates=q.get("trade_date"), source="POINT_IN_TIME_STOCK_SNAPSHOTS",
+            minimum=int(self.cfg.get("history_min_points", 30)),
+        )
 
-    def _previous_target(self, code: str) -> float | None:
+    def _previous_target(self, code: str, stock_config_hash: str | None = None) -> float | None:
         path = self.state_dir / "stock_valuation_snapshots.csv"
         if not path.exists():
             return None
         frame = pd.read_csv(path, dtype={"code": str})
-        if not {"code", "target_position_pct"}.issubset(frame.columns):
-            return None
-        if "valuation_model_version" not in frame.columns:
+        if not {"code", "target_position_pct"}.issubset(frame.columns) or "valuation_model_version" not in frame.columns:
             return None
         frame = frame[frame["valuation_model_version"].astype(str) == self.model_version]
+        if stock_config_hash and "config_hash" in frame:
+            frame = frame[frame["config_hash"].astype(str) == stock_config_hash]
         rows = prepare_history(frame[frame["code"].astype(str).str.zfill(6) == code])
         if rows.empty:
             return None
@@ -1339,7 +1162,11 @@ class ValuationEngine(_LegacyValuationEngine):
         x = self.master[self.master["code"].astype(str) == str(code)]
         config_name = str(info.get("name", code))
         if x.empty:
-            return {"entity": config_name, "code": code, "type": "stock", "valuation_status": "DATA_UNAVAILABLE", "action": "NO_TRADE", "error": "股票不存在或无行情"}
+            return {
+                "entity": config_name, "code": code, "type": "stock",
+                "valuation_status": "DATA_UNAVAILABLE", "action": "NO_TRADE",
+                "error": "股票不存在或无行情",
+            }
         r = x.iloc[0]
         market_name = str(r.get("name", ""))
         name_match = _norm_name(config_name) == _norm_name(market_name)
@@ -1357,7 +1184,9 @@ class ValuationEngine(_LegacyValuationEngine):
                 "action_reason": "行业未配置且无model_override，禁止通用模型静默回退",
             }
         model = str(c["model"])
-        stock_config_hash = _stable_hash({"version": self.model_version, "sector": sector, "model": c, "stock": info.get("model_override")})
+        stock_config_hash = _stable_hash({
+            "version": self.model_version, "sector": sector, "model": c, "stock": info.get("model_override")
+        })
         profit_method = str(r.get("ttm_profit_method", "MISSING"))
         profit_conf = float(r.get("ttm_profit_confidence", 0) or 0)
         if np.isfinite(r.get("pe_ttm_calc", np.nan)) and float(r["pe_ttm_calc"]) > 0:
@@ -1366,9 +1195,14 @@ class ValuationEngine(_LegacyValuationEngine):
             pe, pe_method, pe_conf = float(r["pe_dynamic"]), "QUOTE_PROVIDER_PE", TTM_CONFIDENCE["QUOTE_PROVIDER_PE"]
         else:
             pe, pe_method, pe_conf = np.nan, "MISSING", 0.0
-        def finite(name: str) -> float:
-            value = r.get(name, np.nan)
-            return float(value) if np.isfinite(value) else np.nan
+
+        def finite(field: str) -> float:
+            value = r.get(field, np.nan)
+            try:
+                return float(value) if np.isfinite(value) else np.nan
+            except TypeError:
+                return np.nan
+
         revenue_growth = finite("revenue_yoy_cur") / 100 if np.isfinite(finite("revenue_yoy_cur")) else np.nan
         profit_growth = finite("profit_yoy_cur") / 100 if np.isfinite(finite("profit_yoy_cur")) else np.nan
         net_margin = finite("ttm_profit") / finite("ttm_revenue") if finite("ttm_revenue") > 0 else np.nan
@@ -1379,11 +1213,13 @@ class ValuationEngine(_LegacyValuationEngine):
             "cash_conversion": finite("cash_conversion"), "net_margin": net_margin,
             "profitable_mcap_coverage": 1.0 if finite("ttm_profit") > 0 else 0.0,
             "turnaround": bool(finite("net_profit_pri") <= 0 < finite("net_profit_cur")),
+            "_min_growth_coverage": 0.0,
         }
         fair_model, model_note = self._model_fair(config_name, c, m)
         weights = self._model_weights(c)
         total_weight = sum(weights.values())
         implied: list[tuple[float, float, str]] = []
+        raw_effective_weights: dict[str, float] = {}
         fair_by_metric: dict[str, float] = {"pe": np.nan, "pb": np.nan, "ps": np.nan}
         history_by_metric: dict[str, HistoryStats] = {}
         history_weight_by_metric: dict[str, float] = {}
@@ -1392,10 +1228,19 @@ class ValuationEngine(_LegacyValuationEngine):
         drop_by_metric: dict[str, str] = {}
         current_by_metric = {"pe": pe, "pb": m["pb"], "ps": m["ps"]}
         per_share = {"pe": finite("ttm_eps"), "pb": finite("bvps"), "ps": finite("sps_ttm")}
+        metric_confidence = {
+            "pe": pe_conf,
+            "ps": finite("ttm_revenue_confidence"),
+            "pb": finite("ttm_roe_confidence"),
+            "ocf_yield": finite("ttm_ocfps_confidence"),
+        }
+
         for metric in ("pe", "pb", "ps"):
-            if float(weights.get(metric, 0)) <= 0:
+            configured_weight = float(weights.get(metric, 0))
+            if configured_weight <= 0:
                 continue
-            fair_metric, source, stats, hist_weight = self._blend_multiple(code, metric, fair_model.get(metric, np.nan))
+            model_value = fair_model.get(metric, np.nan)
+            fair_metric, source, stats, hist_weight = self._blend_multiple(code, metric, model_value)
             fair_by_metric[metric] = fair_metric
             history_by_metric[metric] = stats
             history_weight_by_metric[metric] = hist_weight
@@ -1403,27 +1248,44 @@ class ValuationEngine(_LegacyValuationEngine):
             basis = per_share[metric]
             price_value = basis * fair_metric if np.isfinite(basis) and basis > 0 and np.isfinite(fair_metric) else np.nan
             implied_by_metric[metric] = price_value
+            conf = metric_confidence.get(metric, np.nan)
+            conf = max(0.0, min(1.0, float(conf))) if np.isfinite(conf) else 0.0
+            effective_weight = configured_weight * conf
             if not (np.isfinite(price_value) and price_value > 0):
                 drop_by_metric[metric] = "missing_basis_or_independent_anchor"
-            implied.append((price_value, float(weights[metric]), metric.upper()))
+                continue
+            if effective_weight <= 0:
+                drop_by_metric[metric] = "zero_data_confidence"
+                continue
+            raw_effective_weights[metric] = effective_weight
+            implied.append((price_value, effective_weight, metric.upper()))
+
         if float(weights.get("ocf_yield", 0)) > 0:
+            configured_weight = float(weights["ocf_yield"])
             ocfps = finite("ttm_ocfps")
             target_yield = float(c.get("target_ocf_yield", 0.06))
             ocf_price = ocfps / target_yield if ocfps > 0 and target_yield > 0 else np.nan
             implied_by_metric["ocf_yield"] = ocf_price
+            conf = metric_confidence["ocf_yield"]
+            conf = max(0.0, min(1.0, float(conf))) if np.isfinite(conf) else 0.0
+            effective_weight = configured_weight * conf
             if not (np.isfinite(ocf_price) and ocf_price > 0):
                 drop_by_metric["ocf_yield"] = "missing_positive_ocf_or_target_yield"
-            implied.append((ocf_price, float(weights["ocf_yield"]), "OCF_YIELD_PROXY"))
+            elif effective_weight <= 0:
+                drop_by_metric["ocf_yield"] = "zero_data_confidence"
+            else:
+                raw_effective_weights["ocf_yield"] = effective_weight
+                implied.append((ocf_price, effective_weight, "OCF_YIELD_PROXY"))
+
         center, disagreement, models_used = weighted_geometric_price(implied)
-        valid_names = set(models_used)
-        valid_weight = sum(
-            weight for metric, weight in weights.items()
-            if ("OCF_YIELD_PROXY" if metric == "ocf_yield" else metric.upper()) in valid_names
-        )
-        model_weight_coverage = valid_weight / total_weight if total_weight > 0 else 0.0
+        effective_sum = sum(raw_effective_weights.values())
+        model_weight_coverage = effective_sum / total_weight if total_weight > 0 else 0.0
         history_conf = (
-            sum(weights.get(metric, 0.0) * history_weight_by_metric.get(metric, 0.0) * stats.confidence for metric, stats in history_by_metric.items()) / valid_weight
-            if valid_weight > 0 else 0.0
+            sum(
+                raw_effective_weights.get(metric, 0.0) * history_weight_by_metric.get(metric, 0.0) * stats.confidence
+                for metric, stats in history_by_metric.items()
+            ) / effective_sum
+            if effective_sum > 0 else 0.0
         )
         ttm_revenue_conf = finite("ttm_revenue_confidence")
         ttm_score = max(0.0, np.nanmean([profit_conf, ttm_revenue_conf]) if np.isfinite(ttm_revenue_conf) else profit_conf)
@@ -1433,7 +1295,9 @@ class ValuationEngine(_LegacyValuationEngine):
         today_cn = datetime.now(ZoneInfo("Asia/Shanghai")).date()
         financial_age_score = _age_score(self.report_date, today_cn, 120, 540)
         quote_age_score = _age_score(self.quote_trade_date, today_cn, 3, 10)
-        sector_confidence = float(info.get("classification_confidence", 1.0 if info.get("source", "config") == "config" else 0.0))
+        sector_confidence = float(info.get(
+            "classification_confidence", 1.0 if info.get("source", "config") == "config" else 0.0
+        ))
         quality = data_quality_score({
             "ttm": ttm_score, "growth": growth_score, "history": history_conf,
             "cashflow": cash_score, "sector": sector_confidence, "report_coverage": report_cov,
@@ -1444,7 +1308,9 @@ class ValuationEngine(_LegacyValuationEngine):
         q_label = confidence_label(quality)
         base_uncertainty = float(c.get("base_uncertainty", 0.14))
         low, high, sigma = fair_value_interval(center, disagreement, quality, base_uncertainty)
-        margin = required_margin(float(c.get("base_margin", 0.20)), disagreement, quality, float(c.get("cycle_penalty", 0.0)))
+        margin = required_margin(
+            float(c.get("base_margin", 0.20)), disagreement, quality, float(c.get("cycle_penalty", 0.0))
+        )
         residual_stats = self._residual_history(code, stock_config_hash)
         bands = trade_bands(center, low, margin, residual_stats, sigma)
         price = finite("price")
@@ -1456,7 +1322,11 @@ class ValuationEngine(_LegacyValuationEngine):
                 (residual_frame["valuation_model_version"].astype(str) == self.model_version)
                 & (residual_frame["config_hash"].astype(str) == stock_config_hash)
             ]
-            rv = pd.to_numeric(residual_frame.loc[residual_frame["code"].astype(str).str.zfill(6) == code, "valuation_residual"], errors="coerce").dropna()
+            rv = pd.to_numeric(
+                residual_frame.loc[
+                    residual_frame["code"].astype(str).str.zfill(6) == code, "valuation_residual"
+                ], errors="coerce"
+            ).dropna()
             quantile = float((rv <= residual).mean()) if len(rv) else np.nan
             rz = robust_z(residual, residual_stats)
         else:
@@ -1471,7 +1341,8 @@ class ValuationEngine(_LegacyValuationEngine):
         )
         position_cfg = self.cfg.get("position_policy", {})
         target, action, reason = position_policy(
-            price, bands, stage, status == "OK", gate, previous_target=self._previous_target(code),
+            price, bands, stage, status == "OK", gate,
+            previous_target=self._previous_target(code, stock_config_hash),
             failed_gate_max_position=int(position_cfg.get("failed_gate_max_position", 0)),
             watch_gate_scale=float(position_cfg.get("watch_gate_scale", .60)),
             prior_band_max_position=int(position_cfg.get("model_prior_max_position", 30)),
@@ -1500,6 +1371,9 @@ class ValuationEngine(_LegacyValuationEngine):
         if m.get("floor_hit"): risk_flags.append("FAIR_PE_FLOOR_HIT")
         if m.get("cap_hit"): risk_flags.append("FAIR_PE_CAP_HIT")
         if sector_confidence < .60: risk_flags.append("SECTOR_LOW_CONFIDENCE")
+        if not (np.isfinite(revenue_growth) and np.isfinite(profit_growth)) and model != "utility":
+            risk_flags.append("GROWTH_DATA_MISSING")
+
         result = {
             "entity": config_name, "config_name": config_name, "market_name": market_name, "name_match": name_match,
             "code": code, "type": "stock", "sector": sector, "model_family": model,
@@ -1522,7 +1396,8 @@ class ValuationEngine(_LegacyValuationEngine):
             "profit_growth_after_premium_cap": m.get("profit_growth_after_premium_cap_pct", np.nan) / 100,
             "normalized_growth": m.get("normalized_growth_pct", np.nan) / 100,
             "growth_used": m.get("growth_used_pct", np.nan) / 100,
-            "growth_regime": m.get("growth_regime", "NORMAL"), "floor_hit": bool(m.get("floor_hit", False)), "cap_hit": bool(m.get("cap_hit", False)),
+            "growth_regime": m.get("growth_regime", "NORMAL"),
+            "floor_hit": bool(m.get("floor_hit", False)), "cap_hit": bool(m.get("cap_hit", False)),
             "valuation_confidence": q_label, "valuation_status": status,
             "history_status": primary_history.status, "history_points": primary_history.points,
             "history_effective_points": primary_history.effective_points,
@@ -1545,10 +1420,14 @@ class ValuationEngine(_LegacyValuationEngine):
             "risk_flags": ";".join(risk_flags),
         }
         for metric, weight in weights.items():
-            label = "OCF_YIELD_PROXY" if metric == "ocf_yield" else metric.upper()
             result[f"implied_price_{'ocf' if metric == 'ocf_yield' else metric}"] = implied_by_metric.get(metric, np.nan)
             result[f"configured_weight_{metric}"] = weight
-            result[f"effective_weight_{metric}"] = weight / valid_weight if label in valid_names and valid_weight else 0.0
+            result[f"model_confidence_{metric}"] = (
+                raw_effective_weights.get(metric, 0.0) / weight if weight > 0 else 0.0
+            )
+            result[f"effective_weight_{metric}"] = (
+                raw_effective_weights.get(metric, 0.0) / effective_sum if effective_sum > 0 else 0.0
+            )
             result[f"model_drop_reason_{metric}"] = drop_by_metric.get(metric, "")
         return result
 
@@ -1577,7 +1456,9 @@ class ValuationEngine(_LegacyValuationEngine):
         if sector_path.exists():
             old = pd.read_csv(sector_path)
             if "trade_date" not in old:
-                old["trade_date"] = old.get("date", pd.to_datetime(old.get("timestamp"), errors="coerce").dt.date.astype("string"))
+                old["trade_date"] = old.get(
+                    "date", pd.to_datetime(old.get("timestamp"), errors="coerce").dt.date.astype("string")
+                )
             sector_new = pd.concat([old, sector_new], ignore_index=True)
         if len(sector_new):
             sector_new = sector_new.sort_values("timestamp").drop_duplicates(["trade_date", "entity"], keep="last")
@@ -1620,20 +1501,12 @@ def select_report_periods(
     config: dict[str, Any],
     today: date | None = None,
 ) -> ReportSelection:
-    """Resolve the latest sufficiently complete report period.
-
-    Explicit dates in config are respected. With report_date="auto", the
-    newest completed interim period is tried first and the function falls back
-    if cross-sectional coverage is below the configured threshold.
-    """
     min_cov = float(config.get("report_policy", {}).get("min_financial_coverage", 0.80))
     spot = provider.spot()
     spot_codes = set(spot["code"].dropna().astype(str))
-
     explicit = str(config.get("report_date", "auto"))
     candidates = [explicit] if explicit.lower() != "auto" else completed_report_candidates(today=today)
     errors: list[str] = []
-
     for current in candidates:
         try:
             _, auto_prior, auto_annual = report_period_triplet(current)
@@ -1641,7 +1514,6 @@ def select_report_periods(
             annual_cfg = str(config.get("annual_report_date", "auto"))
             prior = prior_cfg if explicit.lower() != "auto" and prior_cfg.lower() != "auto" else auto_prior
             annual = annual_cfg if explicit.lower() != "auto" and annual_cfg.lower() != "auto" else auto_annual
-
             cur = provider.performance(current)
             pri = provider.performance(prior)
             ann = provider.performance(annual)
@@ -1649,25 +1521,20 @@ def select_report_periods(
             pri_codes = set(pri["code"].dropna().astype(str))
             ann_codes = set(ann["code"].dropna().astype(str))
             current_cov = _coverage(spot_codes, cur_codes)
-            # Compare old periods against current reporters rather than today's
-            # whole market, so recent IPOs do not falsely fail the audit.
             prior_cov = _coverage(cur_codes, pri_codes)
             annual_cov = _coverage(cur_codes, ann_codes)
-            if explicit.lower() != "auto" or (current_cov >= min_cov and prior_cov >= min_cov and annual_cov >= min_cov):
+            if explicit.lower() != "auto" or (
+                current_cov >= min_cov and prior_cov >= min_cov and annual_cov >= min_cov
+            ):
                 return ReportSelection(
                     current=current, prior=prior, annual=annual,
                     current_coverage=current_cov, prior_coverage=prior_cov, annual_coverage=annual_cov,
                     source="config" if explicit.lower() != "auto" else "auto-latest-complete",
                 )
-            errors.append(
-                f"{current}: current={current_cov:.1%}, prior={prior_cov:.1%}, annual={annual_cov:.1%}"
-            )
+            errors.append(f"{current}: current={current_cov:.1%}, prior={prior_cov:.1%}, annual={annual_cov:.1%}")
         except Exception as exc:
             errors.append(f"{current}: {type(exc).__name__}: {exc}")
-
-    raise RuntimeError(
-        "无法找到覆盖率达标的财报期。尝试结果: " + " | ".join(errors)
-    )
+    raise RuntimeError("无法找到覆盖率达标的财报期。尝试结果: " + " | ".join(errors))
 
 
 def apply_report_selection(config: dict[str, Any], selection: ReportSelection) -> dict[str, Any]:
@@ -1699,6 +1566,7 @@ def load_config(path: Path) -> dict[str, Any]:
     for sector, model in cfg["sectors"].items():
         if not isinstance(model, dict) or model.get("model") not in supported:
             errors.append(f"sector {sector!r} 的 model 无效")
+            continue
         if "boards" not in model:
             errors.append(f"sector {sector!r} 缺少 boards")
         for board_key in ("boards", "valuation_boards"):
@@ -1710,7 +1578,12 @@ def load_config(path: Path) -> dict[str, Any]:
         if model.get("valuation_boards"):
             classify_names = {_norm_name(a) for spec in model.get("boards", []) for a in spec.get("aliases", [])}
             valuation_names = {_norm_name(a) for spec in model.get("valuation_boards", []) for a in spec.get("aliases", [])}
-            if classify_names and valuation_names and not classify_names.intersection(valuation_names):
+            classify_codes = {str(spec.get("board_code")) for spec in model.get("boards", []) if spec.get("board_code")}
+            valuation_codes = {str(spec.get("board_code")) for spec in model.get("valuation_boards", []) if spec.get("board_code")}
+            if (
+                classify_names and valuation_names and not classify_names.intersection(valuation_names)
+                and not classify_codes.intersection(valuation_codes)
+            ):
                 errors.append(f"sector {sector!r} 的 valuation_boards 与 boards 完全不相交，疑似错配")
         weights = model.get("model_weights")
         if weights is not None:

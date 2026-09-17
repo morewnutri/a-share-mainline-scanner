@@ -83,8 +83,7 @@ def calculate_board_metrics(history: pd.DataFrame) -> dict[str, float | str | pd
         "drawdown_10d": float((close.iloc[-1] / close.tail(10).cummax() - 1).min() * 100),
         "history_days": len(h),
     }
-    # 当外部主力资金接口不可用时，用 Chaikin Money Flow 衡量量价资金压力。
-    # 这是代理指标，不等同于交易所/行情商口径的主力净流入。
+    # 外部主力资金接口不可用时，CMF 只作为量价代理，不冒充真实主力净流入。
     if {"high", "low", "amount"}.issubset(h.columns):
         high = pd.to_numeric(h["high"], errors="coerce")
         low = pd.to_numeric(h["low"], errors="coerce")
@@ -147,7 +146,9 @@ def build_metric_table(
         [same_direct_source, same_proxy_source], [direct_acceleration, proxy_acceleration], default=np.nan,
     )
     out["flow_acceleration_source"] = np.select(
-        [same_direct_source, same_proxy_source], ["东方财富同口径(日值-5日均值)", "CMF同口径变化"], default="不可比/缺失",
+        [same_direct_source, same_proxy_source],
+        ["东方财富同口径(日值-5日均值)", "CMF同口径变化"],
+        default="不可比/缺失",
     )
     return add_amount_share(out)
 
@@ -191,6 +192,43 @@ def _source_adjusted_flow_rank(group: pd.DataFrame, window: int) -> pd.Series:
     return result
 
 
+def _source_adjusted_acceleration_rank(group: pd.DataFrame) -> pd.Series:
+    """资金加速度也必须按同一数据来源内部比较，避免 CMF 与东方财富口径混排。"""
+    result = pd.Series(.5, index=group.index, dtype=float)
+    if "flow_acceleration" not in group:
+        return result
+    sources = group.get("flow_acceleration_source", pd.Series("未知", index=group.index)).astype(str)
+    c1 = pd.to_numeric(group.get("flow_1d_confidence", 0.0), errors="coerce")
+    c5 = pd.to_numeric(group.get("flow_5d_confidence", 0.0), errors="coerce")
+    confidence = pd.concat([pd.Series(c1, index=group.index), pd.Series(c5, index=group.index)], axis=1).min(axis=1).fillna(0.0)
+    values = pd.to_numeric(group["flow_acceleration"], errors="coerce")
+    for source in sources.dropna().unique():
+        if source in {"不可比/缺失", "未知"}:
+            continue
+        mask = (sources == source) & values.notna()
+        if not mask.any():
+            continue
+        ranked = _rank01(values.loc[mask]) if int(mask.sum()) >= 3 else pd.Series(.5, index=group.index[mask])
+        result.loc[mask] = .5 + (ranked - .5) * confidence.loc[mask]
+    return result
+
+
+def _ignition_history_coverage(frame: pd.DataFrame) -> pd.Series:
+    trajectory_cols = [
+        "confirmation_score_rank_velocity_1d",
+        "confirmation_score_rank_velocity_3d",
+        "confirmation_score_delta_1d",
+        "breadth_delta_1d",
+        "breadth_delta_intraday",
+        "amount_share_delta_1d",
+        "amount_share_delta_intraday",
+    ]
+    present = [col for col in trajectory_cols if col in frame]
+    if not present:
+        return pd.Series(0.0, index=frame.index)
+    return frame[present].apply(pd.to_numeric, errors="coerce").notna().mean(axis=1)
+
+
 def score_boards(metrics: pd.DataFrame) -> pd.DataFrame:
     if metrics.empty:
         return metrics
@@ -203,7 +241,7 @@ def score_boards(metrics: pd.DataFrame) -> pd.DataFrame:
     }
     candidate_weights = {
         "acceleration": .18, "slope_3d": .13, "rs_5d": .09,
-        "flow_1d_signal": .14, "flow_acceleration": .10, "amount_ratio_5_20": .11,
+        "flow_1d_signal": .14, "flow_acceleration_signal": .10, "amount_ratio_5_20": .11,
         "turnover_ratio_5_20": .05, "breadth": .08, "trend_r2_5d": .07,
         "distance_high20": .05,
     }
@@ -215,7 +253,7 @@ def score_boards(metrics: pd.DataFrame) -> pd.DataFrame:
         "breadth_delta_intraday": .05,
         "amount_share_delta_1d": .15,
         "amount_share_delta_intraday": .05,
-        "flow_acceleration": .10,
+        "flow_acceleration_signal": .10,
         "acceleration": .10,
         "amount_ratio_5_20": .06,
         "ret_1d": .04,
@@ -224,19 +262,20 @@ def score_boards(metrics: pd.DataFrame) -> pd.DataFrame:
         x = g.copy()
         for window in (1, 5, 10):
             x[f"flow_{window}d_signal"] = _source_adjusted_flow_rank(x, window)
+        x["flow_acceleration_signal"] = _source_adjusted_acceleration_rank(x)
         x["mainline_score"] = _weighted_score(x, main_weights, {"flow_5d_signal", "flow_10d_signal"})
-        x["confirmation_score"] = _weighted_score(x, candidate_weights, {"flow_1d_signal"})
-        # 对已经极度偏离均线/短期暴涨的板块降温，避免把末端加速误判成“即将启动”。
+        x["confirmation_score"] = _weighted_score(
+            x, candidate_weights, {"flow_1d_signal", "flow_acceleration_signal"}
+        )
         crowding = ((x["distance_ma20"] - 12).clip(lower=0) * 0.7 + (x["ret_10d"] - 18).clip(lower=0) * 0.5).clip(upper=18)
         x["crowding_penalty"] = crowding.fillna(0)
         x["confirmation_score"] = (x["confirmation_score"] - x["crowding_penalty"]).clip(0, 100)
-        x["candidate_score"] = x["confirmation_score"]  # 兼容 1.x 输出字段
-        x["ignition_score"] = _weighted_score(x, ignition_weights)
+        x["candidate_score"] = x["confirmation_score"]
+        x["ignition_score"] = _weighted_score(x, ignition_weights, {"flow_acceleration_signal"})
         early_crowding = ((x["ret_5d"] - 8).clip(lower=0) * .9 + (x["ret_10d"] - 15).clip(lower=0) * .45).clip(upper=22)
         x["ignition_score"] = (x["ignition_score"] - early_crowding.fillna(0)).clip(0, 100)
-        # “横盘火种”是另一条正交于动量点火的路径：低位、窄箱体、斜率平、
-        # 波动收缩且没有继续破位。这里使用绝对阈值，避免弱市里按相对排名
-        # 把所有下跌板块都抬成高分。
+        x["ignition_history_coverage"] = _ignition_history_coverage(x)
+
         tightness = ((18 - x["box_range_20d_pct"]) / 12).clip(0, 1)
         flatness = (1 - x["slope_20d"].abs() / .50).clip(0, 1)
         low_level = ((55 - x["range_position_60d_pct"]) / 55).clip(0, 1)
@@ -256,6 +295,7 @@ def score_boards(metrics: pd.DataFrame) -> pd.DataFrame:
         x.loc[~enough_history, "sideways_seed_status"] = "数据不足"
         x.loc[box_ok & (x["sideways_seed_score"] >= 60), "sideways_seed_status"] = "横盘观察"
         x.loc[box_ok & (x["sideways_seed_score"] >= 70), "sideways_seed_status"] = "横盘火种"
+
         main_ok = (x["slope_5d"] > 0) & (x["ret_10d"] > 0) & (x.get("breadth", .5).fillna(.5) >= .45)
         candidate_ok = (x["slope_3d"] > 0) & (x["acceleration"] > 0) & (x["ret_10d"] < 18)
         x["status"] = "普通"
@@ -263,10 +303,13 @@ def score_boards(metrics: pd.DataFrame) -> pd.DataFrame:
         x.loc[(x["confirmation_score"] >= 75) & candidate_ok, "status"] = "潜在启动"
         x.loc[(x["mainline_score"] >= 68) & main_ok, "status"] = "主线观察"
         x.loc[(x["mainline_score"] >= 80) & main_ok, "status"] = "主线核心"
+
+        # Seed/Ignition 是轨迹型标签；至少 40% 的轨迹字段可用才允许进入。
+        trajectory_ok = x["ignition_history_coverage"] >= .40
         x["lifecycle"] = "Dormant"
         x.loc[(x["mainline_score"] >= 62) & main_ok, "lifecycle"] = "Diffusion"
-        x.loc[(x["ignition_score"] >= 60) & (x["ret_5d"] < 8), "lifecycle"] = "Seed"
-        x.loc[(x["ignition_score"] >= 72) & (x["ret_5d"] < 8), "lifecycle"] = "Ignition"
+        x.loc[(x["ignition_score"] >= 60) & (x["ret_5d"] < 8) & trajectory_ok, "lifecycle"] = "Seed"
+        x.loc[(x["ignition_score"] >= 72) & (x["ret_5d"] < 8) & trajectory_ok, "lifecycle"] = "Ignition"
         x.loc[(x["mainline_score"] >= 80) & main_ok, "lifecycle"] = "Mainline"
         x.loc[(x["crowding_penalty"] >= 8) & (x["mainline_score"] >= 65), "lifecycle"] = "Crowded"
         x.loc[(x["mainline_score"] >= 60) & (x["slope_3d"] < 0) & (x["acceleration"] < 0), "lifecycle"] = "Decay"

@@ -49,6 +49,8 @@ mainline-scanner --baostock-mode all --baostock-max-constituents 24
 mainline-scanner --backtest
 ```
 
+板块目录优先使用东方财富；直连和 AKShare 均失败时，会切换到同花顺目录及其板块日线。同花顺目录的板块范围和代码与东方财富不同，结果会在 `目录来源` 列标明。东方财富资金流不可用时，评分使用已标注的量价代理。
+
 ## 实时与历史缓存
 
 实时板块列表和资金流默认缓存 **5 分钟**，历史日线默认缓存 **24 小时**，两者不再共用原来的 8 小时 TTL。东方财富实时域名 `push2` 优先，`push2delay` 只作兜底。
@@ -181,6 +183,7 @@ valuation-scanner --mainline-csv reports/latest/板块完整评分.csv --no-prom
 - PE、PB、PS 只在具备独立锚时参与组合：PE 使用正常化增长，PS 使用收入增长/利润率锚，PB 使用 ROE/资产锚；不再把 `fair_pe × margin/ROE` 重复包装成多个模型。有效模型权重低于 70% 时拒绝交易。
 - 个股公允价使用独立模型隐含价格的加权几何平均，并展开原始隐含价、配置权重、有效权重和丢弃原因；历史倍数按有效样本量进行 log-space shrinkage。
 - 自建 sector/stock 快照记录 `valuation_model_version`、`config_hash` 和板块 `universe_hash`，旧模型或旧成分历史不会进入新估值。交易日期来自上交所交易日历和 `quote_trade_date`，不再把普通工作日当成交易日。
+- A 股估值行情优先使用 AKShare/东方财富，其次直连东方财富；两者均不可用时改用新浪财经完整行情。新浪总市值从万元换算为元，且不把口径不明的新浪 PE 当作东方财富动态 PE。实际行情源写入 `quote_source` 和 `数据抓取审计.csv`；新浪分页不完整时拒绝使用。
 - `MODEL_PRIOR_BANDS` 与估值置信度分开，残差历史未成熟时目标仓位上限为 30%；业绩门槛失败为零仓位，观察门槛和 Decay 在所有价格区间都会降仓。
 - `buy_price` 同时受历史低分位和绝对安全价值约束；最终给出目标仓位、主线阶段、动作和 `action_reason`，而不是只有 BUY/SELL 标签。
 

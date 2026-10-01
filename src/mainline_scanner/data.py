@@ -81,6 +81,7 @@ class EastmoneyAkshareProvider:
         self._eastmoney_history_available: bool | None = None
         self._fallback_lock = threading.Lock()
         self._ths_maps: dict[str, dict[str, str]] = {}
+        self._ths_catalogs: dict[str, dict[str, str]] = {}
         self._sw_map: dict[str, str] = {}
         self._sw_history_lock = threading.Lock()
         self._baostock_provider = None
@@ -206,8 +207,19 @@ class EastmoneyAkshareProvider:
                     LOG.warning("同花顺新增概念目录补充失败，使用静态目录: %s", exc)
             normalized = {self._normalize_board_name(name): code for name, code in mapping.items()}
             self._ths_maps[kind] = normalized
+            self._ths_catalogs[kind] = mapping
             LOG.info("同花顺备用目录已加载: %s %d 个", kind, len(normalized))
             return normalized
+
+    def _ths_universe(self, kind: str) -> pd.DataFrame:
+        """Use the independent THS catalog when both Eastmoney catalogs fail."""
+        self._load_ths_map(kind)
+        catalog = self._ths_catalogs.get(kind, {})
+        if not catalog:
+            raise RuntimeError(f"同花顺 {kind} 板块目录为空")
+        rows = [{"板块名称": name, "板块代码": code, "目录来源": "同花顺"}
+                for name, code in catalog.items()]
+        return pd.DataFrame(rows).drop_duplicates("板块代码").reset_index(drop=True)
 
     def _ths_history(self, kind: str, name: str, start: str, end: str) -> pd.DataFrame:
         """同花顺板块指数日线备用源。"""
@@ -360,15 +372,29 @@ class EastmoneyAkshareProvider:
     def get_universe(self, kind: str) -> pd.DataFrame:
         path = self.cache_dir / f"universe_{kind}.csv"
         if self._fresh_snapshot(path):
-            raw = self._read_cache(path)
+            raw = pd.read_csv(path, encoding="utf-8-sig", dtype={"板块代码": str, "代码": str})
         else:
             try:
                 raw = self._direct_universe(kind)
             except Exception as direct_error:
                 LOG.warning("直连板块列表失败，回退 AKShare: %s", direct_error)
                 func = self.ak.stock_board_industry_name_em if kind == "industry" else self.ak.stock_board_concept_name_em
-                raw = self._call(func)
+                try:
+                    raw = self._call(func)
+                except Exception as ak_error:
+                    LOG.warning("AKShare 板块列表失败，回退同花顺: %s", ak_error)
+                    try:
+                        raw = self._ths_universe(kind)
+                        # THS codes belong to a different namespace; never pass them to Eastmoney history.
+                        self._eastmoney_history_available = False
+                    except Exception as ths_error:
+                        raise RuntimeError(
+                            f"{kind} 板块列表获取失败: 直连东方财富={direct_error}; "
+                            f"AKShare/东方财富={ak_error}; 同花顺={ths_error}"
+                        ) from ths_error
             self._write_cache(raw, path)
+        if "目录来源" in raw and raw["目录来源"].eq("同花顺").any():
+            self._eastmoney_history_available = False
         mapping = {
             _find_col(raw.columns, "板块名称", "名称"): "name",
             _find_col(raw.columns, "板块代码", "代码"): "code",
@@ -383,13 +409,15 @@ class EastmoneyAkshareProvider:
         out = raw.rename(columns=mapping).copy()
         if "name" not in out or "code" not in out:
             raise ValueError(f"板块列表字段不符合预期: {list(raw.columns)}")
+        out["code"] = out["code"].astype(str)
         out["kind"] = kind
         for col in ["snapshot_return", "snapshot_amount", "snapshot_turnover", "up_count", "down_count"]:
-            if col in out:
-                out[col] = pd.to_numeric(out[col], errors="coerce")
+            out[col] = pd.to_numeric(out[col], errors="coerce") if col in out else float("nan")
         if {"up_count", "down_count"}.issubset(out.columns):
             denom = out["up_count"] + out["down_count"]
             out["breadth"] = out["up_count"] / denom.where(denom > 0)
+        if "leader_stock" not in out:
+            out["leader_stock"] = ""
         return out
 
     def _history_path(self, kind: str, code: str, name: str) -> Path:
@@ -507,6 +535,7 @@ class EastmoneyAkshareProvider:
 
     def get_fund_flows(self, kinds: Iterable[str]) -> pd.DataFrame:
         pieces = []
+        direct_unavailable = False
         for kind in kinds:
             sector_type = "行业资金流" if kind == "industry" else "概念资金流"
             for indicator, window in [("今日", 1), ("5日", 5), ("10日", 10)]:
@@ -515,6 +544,8 @@ class EastmoneyAkshareProvider:
                     if self._fresh_snapshot(path):
                         raw = self._read_cache(path)
                     else:
+                        if direct_unavailable:
+                            continue
                         raw = self._direct_fund_flow(kind, window)
                         self._write_cache(raw, path)
                     name_col = _find_col(raw.columns, "名称")
@@ -530,6 +561,8 @@ class EastmoneyAkshareProvider:
                     pieces.append(x)
                 except Exception as exc:
                     LOG.warning("%s %s 获取失败，将以缺失值继续: %s", sector_type, indicator, exc)
+                    if not self._fresh_snapshot(path):
+                        direct_unavailable = True
                 time.sleep(0.15)
         if not pieces:
             return pd.DataFrame(columns=["kind", "name"])

@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
+import requests
 
 from .valuation_policy import (
     HistoryStats,
@@ -207,6 +208,7 @@ class ValuationDataProvider:
         self._fetch_audit[key] = {
             "dataset": key,
             "rows": len(df),
+            "source": str(df["行情源"].iloc[0]) if "行情源" in df and len(df) else "",
             "cache_used": cache_used,
             "refresh_requested": self.refresh,
             "fetched_at": fetched_at.isoformat(timespec="seconds"),
@@ -218,7 +220,7 @@ class ValuationDataProvider:
     def freshness_frame(self) -> pd.DataFrame:
         if not self._fetch_audit:
             return pd.DataFrame(columns=[
-                "dataset", "rows", "cache_used", "refresh_requested", "fetched_at", "cache_path", "ttl_minutes"
+                "dataset", "rows", "source", "cache_used", "refresh_requested", "fetched_at", "cache_path", "ttl_minutes"
             ])
         return pd.DataFrame(self._fetch_audit.values()).sort_values("dataset").reset_index(drop=True)
 
@@ -242,31 +244,95 @@ class ValuationDataProvider:
             raise RuntimeError(f"无法解析上交所交易日历: {exc}") from exc
         raise RuntimeError(f"上交所交易日历在 {today} 前未返回交易日")
 
+    @staticmethod
+    def _sina_spot() -> pd.DataFrame:
+        """Fetch a complete A-share quote snapshot independently of Eastmoney."""
+        base = "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+        count_response = requests.get(
+            base + "Market_Center.getHQNodeStockCount", params={"node": "hs_a"}, timeout=15,
+        )
+        count_response.raise_for_status()
+        total = int(str(count_response.json()).strip('"'))
+        if total <= 0:
+            raise RuntimeError("新浪股票列表为空")
+
+        rows: list[dict] = []
+        page_size = 100  # Sina silently caps larger page sizes at 100.
+        for page in range(1, (total + page_size - 1) // page_size + 1):
+            response = requests.get(
+                base + "Market_Center.getHQNodeData",
+                params={"page": page, "num": page_size, "sort": "symbol", "asc": 1, "node": "hs_a"},
+                timeout=15,
+            )
+            response.raise_for_status()
+            page_rows = response.json()
+            if not isinstance(page_rows, list) or not page_rows:
+                raise RuntimeError(f"新浪股票列表第 {page} 页为空或格式异常")
+            rows.extend(page_rows)
+
+        raw = pd.DataFrame(rows)
+        required = {"code", "name", "trade", "mktcap", "pb"}
+        if not required.issubset(raw.columns):
+            raise RuntimeError(f"新浪股票列表缺少字段: {sorted(required - set(raw.columns))}")
+        raw["code"] = raw["code"].astype(str).str.extract(r"(\d{6})", expand=False)
+        raw = raw.dropna(subset=["code"]).drop_duplicates("code")
+        if len(raw) < total * 0.9:
+            raise RuntimeError(f"新浪股票列表覆盖不足: {len(raw)}/{total}")
+        # Sina's mktcap is in 10,000 CNY; Eastmoney's 总市值 is in CNY.
+        market_cap = pd.to_numeric(raw["mktcap"], errors="coerce") * 10_000
+        if (market_cap > 0).sum() < total * 0.9:
+            raise RuntimeError("新浪股票列表的总市值覆盖不足")
+        return pd.DataFrame({
+            "代码": raw["code"], "名称": raw["name"],
+            "最新价": raw["trade"], "总市值": market_cap,
+            "市净率": raw["pb"],
+            # Sina's `per` is not guaranteed to match Eastmoney's dynamic PE.
+            "市盈率-动态": np.nan,
+            "行情源": "新浪财经",
+        }).reset_index(drop=True)
+
     def spot(self) -> pd.DataFrame:
         def load_ak() -> pd.DataFrame:
             try:
-                return self.ak.stock_zh_a_spot_em()
-            except Exception:
+                frame = self.ak.stock_zh_a_spot_em()
+                if not isinstance(frame, pd.DataFrame) or frame.empty:
+                    raise RuntimeError("AKShare 东方财富行情为空")
+                frame["行情源"] = "AKShare/东方财富"
+                return frame
+            except Exception as ak_error:
                 rows: list[dict] = []
                 page = 1
-                while True:
-                    params = {
-                        "pn": page, "pz": 200, "po": 1, "np": 1,
-                        "ut": "bd1d9ddb04089700cf9c27f6f7426281", "fltt": 2, "invt": 2,
-                        "fid": "f3", "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23",
-                        "fields": "f2,f3,f9,f12,f14,f20,f21,f23",
-                    }
-                    payload = self.base._eastmoney_json("/api/qt/clist/get", params)
-                    data = payload.get("data") or {}
-                    diff = data.get("diff") or []
-                    rows.extend(diff)
-                    if not diff or len(rows) >= int(data.get("total") or 0):
-                        break
-                    page += 1
-                return pd.DataFrame(rows).rename(columns={
-                    "f12": "代码", "f14": "名称", "f2": "最新价", "f3": "涨跌幅",
-                    "f9": "市盈率-动态", "f20": "总市值", "f21": "流通市值", "f23": "市净率",
-                })
+                try:
+                    while True:
+                        params = {
+                            "pn": page, "pz": 200, "po": 1, "np": 1,
+                            "ut": "bd1d9ddb04089700cf9c27f6f7426281", "fltt": 2, "invt": 2,
+                            "fid": "f3", "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23",
+                            "fields": "f2,f3,f9,f12,f14,f20,f21,f23",
+                        }
+                        payload = self.base._eastmoney_json("/api/qt/clist/get", params)
+                        data = payload.get("data") or {}
+                        diff = data.get("diff") or []
+                        rows.extend(diff)
+                        if not diff or len(rows) >= int(data.get("total") or 0):
+                            break
+                        page += 1
+                    if not rows:
+                        raise RuntimeError("东方财富行情为空")
+                    frame = pd.DataFrame(rows).rename(columns={
+                        "f12": "代码", "f14": "名称", "f2": "最新价", "f3": "涨跌幅",
+                        "f9": "市盈率-动态", "f20": "总市值", "f21": "流通市值", "f23": "市净率",
+                    })
+                    frame["行情源"] = "直连东方财富"
+                    return frame
+                except Exception as direct_error:
+                    try:
+                        return self._sina_spot()
+                    except Exception as sina_error:
+                        raise RuntimeError(
+                            "A股行情获取失败: AKShare/东方财富="
+                            f"{ak_error}; 直连东方财富={direct_error}; 新浪财经={sina_error}"
+                        ) from sina_error
 
         df = self._cached_frame("a_spot", load_ak, timedelta(minutes=5)).copy()
         code = _pick(df.columns, "代码", "股票代码")
@@ -284,6 +350,7 @@ class ValuationDataProvider:
             "pe_dynamic": _num(df[pe]) if pe else np.nan,
             "pb": _num(df[pb]) if pb else np.nan,
             "quote_trade_date": quote_trade_date,
+            "quote_source": df["行情源"].astype(str) if "行情源" in df else "未知",
         })
         return out.drop_duplicates("code")
 

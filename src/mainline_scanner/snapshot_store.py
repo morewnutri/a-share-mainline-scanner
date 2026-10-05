@@ -75,7 +75,8 @@ class SnapshotStore:
     @staticmethod
     def _add_ranks(frame: pd.DataFrame) -> pd.DataFrame:
         out = frame.copy()
-        for score in ("mainline_score", "confirmation_score", "candidate_score", "ignition_score"):
+        for score in ("mainline_score", "confirmation_score", "candidate_score", "ignition_score",
+                      "potential_score", "market_confirmation_score", "exhaustion_score"):
             if score in out:
                 out[f"{score}_rank"] = out.groupby("kind")[score].rank(method="min", ascending=False)
         return out
@@ -88,8 +89,10 @@ class SnapshotStore:
         value_cols = [
             col for col in (
                 "mainline_score", "confirmation_score", "candidate_score", "ignition_score",
-                "breadth", "amount_share",
+                "potential_score", "market_confirmation_score", "exhaustion_score",
+                "breadth", "amount_share", "turnover_share", "rs_market_5d",
                 "mainline_score_rank", "confirmation_score_rank", "candidate_score_rank", "ignition_score_rank",
+                "potential_score_rank", "market_confirmation_score_rank", "exhaustion_score_rank",
             ) if col in previous
         ]
         prior = previous[KEYS + value_cols].drop_duplicates(KEYS).rename(

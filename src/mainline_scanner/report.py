@@ -147,6 +147,7 @@ def write_outputs(
     output_dir: Path,
     audit: pd.DataFrame | None = None,
     audit_summary: pd.DataFrame | None = None,
+    market_audit: pd.DataFrame | None = None,
 ) -> dict[str, Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     full_csv = output_dir / "板块完整评分.csv"
@@ -159,6 +160,22 @@ def write_outputs(
     omitted_csv = output_dir / "遗漏板块明细.csv"
     sideways_csv = output_dir / "横盘火种.csv"
     sideways_chart = output_dir / "横盘火种雷达.png"
+    market_audit_path = output_dir / "全A数据质量.csv"
+    if market_audit is not None and not market_audit.empty:
+        market_audit.to_csv(market_audit_path, index=False, encoding="utf-8-sig")
+    radar_specs = {
+        "研究潜在主线": ("potential_rank_score", ["research_phase", "potential_rank_score", "potential_score", "potential_coverage", "potential_state", "market_confirmation_score", "geo_net_exposure"]),
+        "市场确认主线": ("market_confirmation_rank_score", ["research_phase", "market_confirmation_rank_score", "market_confirmation_score", "confirmation_coverage", "potential_score", "top_rank_days_10", "turnover_share", "rs_market_5d", "breadth"]),
+        "主线切换": ("switch_score", ["switch_score", "switch_from", "confirmation_change", "turnover_change", "market_confirmation_score", "potential_score"]),
+        "退潮风险": ("exhaustion_rank_score", ["exhaustion_rank_score", "exhaustion_score", "exhaustion_coverage", "risk_breadth_divergence", "risk_leader_divergence", "risk_turnover_efficiency_loss", "risk_failure_rate", "risk_catalyst_exhaustion"]),
+    }
+    radar_tables: dict[str, pd.DataFrame] = {}
+    for title, (sort_col, columns) in radar_specs.items():
+        if sort_col not in scored:
+            continue
+        order = scored.sort_values(sort_col, ascending=False, na_position="last")
+        radar_tables[title] = order[[c for c in ["kind", "code", "name", *columns] if c in order]]
+        radar_tables[title].to_csv(output_dir / f"{title}.csv", index=False, encoding="utf-8-sig")
     scored.to_csv(full_csv, index=False, encoding="utf-8-sig")
     sideways = scored[scored.get("sideways_seed_status", pd.Series("", index=scored.index)).isin(["横盘火种", "横盘观察"])].sort_values("sideways_seed_score", ascending=False)
     sideways.to_csv(sideways_csv, index=False, encoding="utf-8-sig")
@@ -170,10 +187,14 @@ def write_outputs(
                 writer, sheet_name="火种雷达", index=False,
             )
         sideways.to_excel(writer, sheet_name="横盘火种", index=False)
+        for title, table in radar_tables.items():
+            table.to_excel(writer, sheet_name=title, index=False)
         scored[scored["status"].isin(["潜在启动", "值得关注"])].sort_values("candidate_score", ascending=False).to_excel(writer, sheet_name="潜在主线", index=False)
         failures.to_excel(writer, sheet_name="抓取失败", index=False)
         if audit_summary is not None:
             audit_summary.to_excel(writer, sheet_name="完整性汇总", index=False)
+        if market_audit is not None and not market_audit.empty:
+            market_audit.tail(60).to_excel(writer, sheet_name="全A数据质量", index=False)
         if audit is not None:
             audit[audit["is_omitted"]].to_excel(writer, sheet_name="遗漏板块", index=False)
         for ws in writer.book.worksheets:
@@ -202,6 +223,10 @@ def write_outputs(
     candidate = candidate[candidate.get("lifecycle", pd.Series(index=candidate.index, dtype=str)).isin(["Seed", "Ignition"])].sort_values("ignition_score", ascending=False)
     sideways_display = _deduplicate_for_display(scored, "sideways_seed_score")
     sideways_display = sideways_display[sideways_display["sideways_seed_status"].isin(["横盘火种", "横盘观察"])].sort_values("sideways_seed_score", ascending=False)
+    radar_text = "\n\n".join(
+        f"## {title}\n\n{table.head(20).to_markdown(index=False, floatfmt='.2f')}"
+        for title, table in radar_tables.items()
+    )
     as_of = pd.to_datetime(scored["as_of"]).max().date()
     coverage_text = ""
     if audit_summary is not None and not audit_summary.empty:
@@ -229,6 +254,8 @@ def write_outputs(
 
 {_fmt_sideways_table(sideways_display, 20) if not sideways_display.empty else '当前没有满足绝对门槛的低位箱体板块。'}
 
+{radar_text}
+
 ## 判定逻辑
 
 - **主线分**：5/10 日涨幅、趋势斜率及拟合质量、相对强弱、5/10 日主力净流入占比、上涨家数占比、量能和上涨持续性。
@@ -237,17 +264,29 @@ def write_outputs(
 - **确认分**（兼容字段 `candidate_score`）：保留原有短斜率、加速度、相对强弱和量价扩张逻辑，用于确认扩散，而不再冒充真正的早期发现分。
 - 生命周期为 `Dormant → Seed → Ignition → Diffusion → Mainline → Crowded/Decay`；首次运行缺少排名和广度轨迹，连续保存快照后火种分才具备完整信息。
 - 东方财富主力资金与 CMF 代理分别做横截面标准化，CMF 信号按较低置信度收缩；资金加速度也只在同口径内计算。
+- **研究潜在主线**按盈利修订、产业、政策、连续催化与预期差分别评分；缺少时点证据时为 NaN，仍保留板块供人工研究。
+- **市场确认主线**按真实成交占比趋势、5/10/20 日相对强度、广度、10 日持续性、龙头梯队、流动性和低权重注意力评分。缺少独立市场数据时成交项退回标明的自身成交异常。
+- **退潮与切换**分别监测广度背离、龙头背离、成交效率衰减、接力失败和催化耗尽，以及挑战者相对原主线的确认分与成交占比变化。各榜单均显示全量板块，不以固定分数直接剔除。
+- `potential_coverage`、`confirmation_coverage` 和 `exhaustion_coverage` 显示各模型可用权重比例；低覆盖分数仅作线索。历史概念成分和免费接口限制仍需逐项审计。
 
 > 这是量价与资金行为筛选器，不是收益保证或买卖建议。板块概念存在重叠，应用时还需结合政策/事件驱动、指数环境、个股位置与风险预算复核。
 """
     md.write_text(report, encoding="utf-8")
     table_html = scored.head(100).to_html(index=False, classes="data", border=0, float_format=lambda v: f"{v:.2f}")
+    radar_html = "".join(
+        f"<h2>{html.escape(title)}</h2>" + table.head(20).to_html(index=False, classes="data", border=0,
+                                                            float_format=lambda v: f"{v:.2f}")
+        for title, table in radar_tables.items()
+    )
     html_path.write_text(f"""<!doctype html><meta charset='utf-8'><title>A股主线雷达</title>
 <style>body{{font-family:'Microsoft YaHei',sans-serif;max-width:1500px;margin:auto;padding:24px;background:#f7f8fa}}img{{max-width:100%;background:white}}table{{border-collapse:collapse;background:white;font-size:12px}}th,td{{padding:6px 8px;border:1px solid #ddd;white-space:nowrap}}th{{position:sticky;top:0;background:#263238;color:white}}h1{{color:#263238}}</style>
 <h1>A股板块主线雷达</h1><p>数据截止 {as_of}；共 {len(scored)} 个有效板块。</p>
-<img src='{html.escape(dashboard.name)}'><img src='{html.escape(sideways_chart.name)}'><img src='{html.escape(trends.name)}'><h2>完整评分（前100）</h2>{table_html}
+<img src='{html.escape(dashboard.name)}'><img src='{html.escape(sideways_chart.name)}'><img src='{html.escape(trends.name)}'>{radar_html}<h2>完整评分（前100）</h2>{table_html}
 """, encoding="utf-8")
     paths = {"csv": full_csv, "sideways_csv": sideways_csv, "xlsx": xlsx, "dashboard": dashboard, "sideways_chart": sideways_chart, "trends": trends, "markdown": md, "html": html_path}
+    paths.update({title: output_dir / f"{title}.csv" for title in radar_tables})
     if audit is not None:
         paths.update({"audit_xlsx": audit_xlsx, "omitted_csv": omitted_csv})
+    if market_audit is not None and not market_audit.empty:
+        paths["market_audit"] = market_audit_path
     return paths

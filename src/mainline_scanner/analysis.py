@@ -135,6 +135,7 @@ def build_metric_table(
         )
     out["rs_5d"] = out["ret_5d"] - out.groupby("kind")["ret_5d"].transform("median")
     out["rs_10d"] = out["ret_10d"] - out.groupby("kind")["ret_10d"].transform("median")
+    out["rs_20d"] = out["ret_20d"] - out.groupby("kind")["ret_20d"].transform("median")
     direct_acceleration = out["flow_1d_direct_pct"] - out["flow_5d_direct_pct"] / 5.0
     proxy_acceleration = out.get("flow_proxy_1d_pct", np.nan) - out.get("flow_proxy_5d_pct", np.nan)
     same_direct_source = out["flow_1d_direct_pct"].notna() & out["flow_5d_direct_pct"].notna()

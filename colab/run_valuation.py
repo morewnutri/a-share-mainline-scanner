@@ -43,6 +43,12 @@ def main() -> None:
         "--state-dir", str(state_dir),
         "--output-dir", str(output_dir),
     ]
+    mainline_csv = Path("/content/a-share-mainline-results/板块完整评分.csv")
+    if mainline_csv.is_file():
+        argv.extend(["--mainline-csv", str(mainline_csv)])
+        print(f"主线阶段文件: {mainline_csv}")
+    else:
+        print("主线阶段文件不存在；估值中的 mainline_stage 将为 UNKNOWN。请先运行 colab/run_scan.py。")
     if REFRESH:
         argv.append("--refresh")
 

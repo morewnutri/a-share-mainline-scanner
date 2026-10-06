@@ -18,3 +18,18 @@ def test_colab_scan_displays_sideways_seed_table_and_chart():
     assert "横盘火种（低位箱体）Top 30" in scan
     assert "sideways_seed_status" in scan
     assert "横盘火种雷达.png" in scan
+
+
+def test_colab_scan_displays_research_radars_and_passes_optional_data():
+    scan = (ROOT / "colab" / "run_scan.py").read_text(encoding="utf-8")
+    for title in ("研究潜在主线", "市场确认主线", "主线切换", "退潮风险"):
+        assert f"{title}.csv" in scan
+    assert "--research-signals" in scan
+    assert "--market-history" in scan
+    assert "potential_coverage" in scan
+
+
+def test_colab_valuation_uses_scan_output():
+    valuation = (ROOT / "colab" / "run_valuation.py").read_text(encoding="utf-8")
+    assert "/content/a-share-mainline-results/板块完整评分.csv" in valuation
+    assert "--mainline-csv" in valuation

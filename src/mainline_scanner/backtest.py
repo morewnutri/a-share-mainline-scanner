@@ -9,6 +9,90 @@ import pandas as pd
 from .snapshot_store import SnapshotStore
 
 
+def evaluate_future_dominance(snapshot_dir: Path, horizon: int = 20, top_k: int = 10) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Forward-only dominance label; requires a full future window of saved daily snapshots."""
+    store = SnapshotStore(snapshot_dir)
+    latest = {}
+    for ref in store.list():
+        latest[ref.captured_at.date()] = ref
+    frames = [store._read(latest[day]) for day in sorted(latest)]
+    rows = []
+    for start in range(max(0, len(frames) - horizon)):
+        current = frames[start]
+        future = frames[start + 1:start + 1 + horizon]
+        if len(future) < horizon or "potential_score" not in current:
+            continue
+        for kind, group in current.groupby("kind"):
+            candidate_cols = ["kind", "code", "name", "potential_score"]
+            if "potential_rank_score" in group:
+                candidate_cols.append("potential_rank_score")
+            if "last_close" in group:
+                candidate_cols.append("last_close")
+            candidates = group[candidate_cols].copy()
+            values = []
+            for _, candidate in candidates.iterrows():
+                key = str(candidate["code"])
+                daily = []
+                for frame in future:
+                    peers = frame[frame["kind"].astype(str) == str(kind)].copy()
+                    peers["code"] = peers["code"].astype(str)
+                    match = peers[peers["code"] == key]
+                    if match.empty:
+                        continue
+                    r = pd.to_numeric(peers.get("ret_1d", pd.Series(np.nan, index=peers.index)), errors="coerce")
+                    turnover = pd.to_numeric(peers.get("turnover_share", pd.Series(np.nan, index=peers.index)), errors="coerce")
+                    row = match.iloc[0]
+                    daily.append({
+                        "excess": pd.to_numeric(row.get("ret_1d"), errors="coerce") - r.median(),
+                        "top_day": float(r.rank(pct=True).loc[match.index[0]] >= .8) if r.notna().sum() >= 3 else np.nan,
+                        "share_rank": turnover.rank(pct=True).loc[match.index[0]] if turnover.notna().sum() >= 3 else np.nan,
+                        "breadth": pd.to_numeric(row.get("breadth"), errors="coerce"),
+                        "close": pd.to_numeric(row.get("last_close"), errors="coerce"),
+                    })
+                if len(daily) < horizon:
+                    continue
+                series = pd.DataFrame(daily)
+                close = series["close"]
+                starting_close = pd.to_numeric(candidate.get("last_close"), errors="coerce")
+                if pd.notna(starting_close):
+                    close = pd.concat([pd.Series([starting_close]), close], ignore_index=True)
+                max_drawdown = (close / close.cummax() - 1).min() if close.notna().all() else np.nan
+                values.append({
+                    "kind": kind, "code": key, "name": candidate["name"],
+                    "signal_date": pd.Timestamp(sorted(latest)[start]),
+                    "potential_score_at_signal": candidate["potential_score"],
+                    "potential_rank_score_at_signal": candidate.get("potential_rank_score", candidate["potential_score"]),
+                    "future_turnover_rank": series["share_rank"].mean(),
+                    "future_excess_return": series["excess"].sum(min_count=1),
+                    "future_top_strength_days": series["top_day"].mean(),
+                    "future_breadth": series["breadth"].mean(),
+                    "future_max_drawdown": max_drawdown,
+                })
+            if not values:
+                continue
+            block = pd.DataFrame(values)
+            components = ["future_turnover_rank", "future_excess_return", "future_top_strength_days",
+                          "future_breadth", "future_max_drawdown"]
+            ranked = block[components].rank(pct=True)
+            block["future_dominance_score"] = ranked.mean(axis=1) * 100
+            block["future_dominance_coverage"] = ranked.notna().mean(axis=1)
+            block["future_mainline_label"] = block["future_dominance_score"].rank(pct=True) >= .8
+            rows.append(block)
+    detail = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+    if detail.empty:
+        return detail, pd.DataFrame()
+    eligible = detail[detail["potential_rank_score_at_signal"].notna()]
+    picks = eligible.sort_values("potential_rank_score_at_signal", ascending=False).groupby(
+        ["signal_date", "kind"], group_keys=False
+    ).head(top_k)
+    summary = pd.DataFrame([{
+        "evaluated_signals": len(picks), "horizon_sessions": horizon,
+        f"potential_precision_at_{top_k}": picks["future_mainline_label"].mean() if len(picks) else np.nan,
+        "label_is_relative": True,
+    }])
+    return detail, summary
+
+
 def evaluate_snapshots(
     snapshot_dir: Path,
     *,
@@ -86,7 +170,13 @@ def write_backtest(snapshot_dir: Path, output_dir: Path, **kwargs: object) -> di
     summary_path = output_dir / "火种信号回放汇总.csv"
     detail.to_csv(detail_path, index=False, encoding="utf-8-sig")
     summary.to_csv(summary_path, index=False, encoding="utf-8-sig")
-    return {"backtest_detail": detail_path, "backtest_summary": summary_path}
+    dominance, dominance_summary = evaluate_future_dominance(snapshot_dir)
+    dominance_path = output_dir / "未来主线标签明细.csv"
+    dominance_summary_path = output_dir / "未来主线标签汇总.csv"
+    dominance.to_csv(dominance_path, index=False, encoding="utf-8-sig")
+    dominance_summary.to_csv(dominance_summary_path, index=False, encoding="utf-8-sig")
+    return {"backtest_detail": detail_path, "backtest_summary": summary_path,
+            "dominance_detail": dominance_path, "dominance_summary": dominance_summary_path}
 
 
 def main() -> None:

@@ -1,5 +1,8 @@
+from pathlib import Path
+
 from mainline_scanner.valuation_cli import (
     load_mainline_stages,
+    resolve_mainline_path,
     load_custom_stocks,
     merge_stock_pools,
     parse_stock_codes,
@@ -40,3 +43,11 @@ def test_load_mainline_stages_maps_board_alias(tmp_path):
     path.write_text("name,lifecycle,mainline_score\n家用电器,Ignition,75\n", encoding="utf-8-sig")
     cfg = {"sectors": {"家电": {"boards": [{"kind": "industry", "aliases": ["家电行业", "家用电器"]}]}}}
     assert load_mainline_stages(path, cfg)["家电"] == "Ignition"
+
+
+def test_default_mainline_path_prefers_colab_scan_output(tmp_path):
+    scan = tmp_path / "板块完整评分.csv"
+    scan.write_text("name,lifecycle\n家用电器,Mainline\n", encoding="utf-8")
+    assert resolve_mainline_path(Path("reports/latest/板块完整评分.csv"), scan) == scan
+    explicit = Path("custom/scan.csv")
+    assert resolve_mainline_path(explicit, scan) == explicit

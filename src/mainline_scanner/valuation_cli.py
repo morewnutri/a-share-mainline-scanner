@@ -100,6 +100,13 @@ def _norm_board_name(value: Any) -> str:
     return re.sub(r"[\s_（）()\-—·/]|概念|板块|行业", "", str(value)).lower()
 
 
+def resolve_mainline_path(path: Path, colab_path: Path = Path("/content/a-share-mainline-results/板块完整评分.csv")) -> Path:
+    """Use the scan runner's output for the CLI default inside Colab."""
+    if Path(path) == Path("reports/latest/板块完整评分.csv") and colab_path.is_file():
+        return colab_path
+    return Path(path)
+
+
 def load_mainline_stages(path: Path, cfg: dict[str, Any]) -> dict[str, str]:
     """Map configured valuation families to the latest scanner lifecycle output."""
     path = Path(path)
@@ -382,7 +389,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     # exactly which financial period powered each run.
     selection = select_report_periods(provider, cfg_raw)
     cfg = apply_report_selection(cfg_raw, selection)
-    cfg["_mainline_stages"] = load_mainline_stages(Path(args.mainline_csv), cfg)
+    mainline_path = resolve_mainline_path(Path(args.mainline_csv))
+    if mainline_path != Path(args.mainline_csv):
+        print(f"[INFO] 使用 Colab 主线扫描结果: {mainline_path}")
+    cfg["_mainline_stages"] = load_mainline_stages(mainline_path, cfg)
+    print(f"[INFO] 主线阶段映射: {len(cfg['_mainline_stages'])}/{len(cfg.get('sectors', {}))} 个估值板块；来源 {mainline_path}")
 
     default_stocks = {str(k): dict(v) for k, v in cfg.get("stocks", {}).items()}
     custom = load_custom_stocks(state_dir)

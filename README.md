@@ -14,6 +14,18 @@ Dormant → Seed → Ignition → Diffusion → Mainline → Crowded / Decay
 
 `candidate_score` 为兼容 1.x 保留，等同于新的 `confirmation_score`。真正用于早期雷达的是 `ignition_score`。
 
+## 研究报告四层雷达
+
+扫描现在额外输出 **研究潜在主线、市场确认主线、主线切换、退潮风险** 四张全量排行榜。它们与原有动量火种并行：潜在分只使用当时已公布的盈利、产业、政策、催化和预期差信号；市场确认分使用成交、相对强度、广度、持续性、龙头梯队、流动性和低权重关注度；退潮分和切换分独立展示。
+
+```powershell
+mainline-scanner --lookback-calendar-days 120 --market-history data/input/market_daily.csv --research-signals data/input/board_signals.csv
+```
+
+`--market-history` 至少需要 `date,market_amount`，可加 `benchmark_close`。成交额应与板块日线同单位；工具不会把重叠概念的成交额总和当成全 A 市场成交额。若提供个股成交额汇总 `stock_amount_sum`，将逐日与独立全市场成交额核对，默认误差超过 5% 即停止扫描；可用 `--market-reconciliation-tolerance` 调整。可选股票池计数字段会生成 `全A数据质量.csv`。若没有该文件，则保留自身成交异常作为低信息量候选信号，真实 `turnover_share` 留空。`--research-signals` 需要 `kind,code,available_at`，可加 `published_at` 和报告涉及的各项 0–1 证据分；见 [字段和时点规则](docs/research_signal_schema.md)。没有外部证据时 `potential_score` 为缺失，板块仍保留在四张榜中，`potential_state` 标明“基本面资料待补”。
+
+这些权重来自研究报告的初始假设，并未被证明最优。**覆盖率列**显示分数依据的实际可用权重；各榜优先用 `*_rank_score = 50 + (score-50) × coverage` 排序，让低覆盖的极端值向中性收缩，不直接淘汰板块。默认不按 15% 成交占比、涨停家数、80 分或固定龙头连板数淘汰板块。`--exclude-regex` 默认空，用户需要时才主动过滤。已保存的历史快照会继续提供排名和确认分变化；首次运行的切换信号缺少历史轨迹。
+
 ## 安装与运行
 
 ```powershell
@@ -143,11 +155,14 @@ mainline-backtest --snapshot-dir data/snapshots --output-dir reports/backtest
 
 这是对扫描器“是否提前发现”的评估，不是买卖收益回测。
 
+同时输出 `未来主线标签明细.csv`、`未来主线标签汇总.csv`：只对未来完整 20 个交易日的快照构造相对成交占比排名、超额收益、强势天数、广度和最大回撤的综合标签，并评估潜在主线榜的前 K 命中率。标签只用于回放评价，不参与当日预测。免费概念历史成分可能被后续调整，历史标签仍有成分时点限制；至少积累 21 天快照才能生成首个完整标签。
+
 ## 输出文件
 
 默认输出到 `reports/latest/`：
 
 - `板块完整评分.csv`
+- `研究潜在主线.csv`、`市场确认主线.csv`、`主线切换.csv`、`退潮风险.csv`
 - `横盘火种.csv`
 - `板块主线扫描.xlsx`（含“火种雷达”和“横盘火种”工作表）
 - `主线雷达.png`

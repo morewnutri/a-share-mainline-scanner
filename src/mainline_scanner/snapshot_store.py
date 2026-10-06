@@ -50,7 +50,9 @@ class SnapshotStore:
 
     @staticmethod
     def _read(ref: SnapshotRef) -> pd.DataFrame:
-        frame = pd.read_csv(ref.path, encoding="utf-8-sig")
+        # Numeric-looking board codes must remain text across sessions. Otherwise
+        # pandas infers int64 here and the next scan's string keys cannot merge.
+        frame = pd.read_csv(ref.path, encoding="utf-8-sig", dtype={"kind": str, "code": str})
         frame["captured_at"] = pd.to_datetime(frame.get("captured_at", ref.captured_at), errors="coerce")
         return frame
 
@@ -75,6 +77,10 @@ class SnapshotStore:
     @staticmethod
     def _add_ranks(frame: pd.DataFrame) -> pd.DataFrame:
         out = frame.copy()
+        if "kind" in out:
+            out["kind"] = out["kind"].astype(str)
+        if "code" in out:
+            out["code"] = out["code"].astype(str)
         for score in ("mainline_score", "confirmation_score", "candidate_score", "ignition_score",
                       "potential_score", "market_confirmation_score", "exhaustion_score"):
             if score in out:

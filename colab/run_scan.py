@@ -80,7 +80,13 @@ def main() -> None:
         command.extend(["--market-history", str(MARKET_HISTORY_FILE)])
     else:
         print("全A市场日线文件缺失：真实成交占比和指数相对强度将为空，使用已标注的量价代理。")
-    subprocess.run(command, cwd=repo_root, check=True)
+    scan_result = subprocess.run(command, cwd=repo_root, text=True, capture_output=True)
+    if scan_result.returncode:
+        if scan_result.stdout:
+            print(scan_result.stdout[-8000:])
+        if scan_result.stderr:
+            print(scan_result.stderr[-12000:], file=sys.stderr)
+        raise RuntimeError(f"扫描器退出码 {scan_result.returncode}；上方是原始日志和异常。")
 
     import pandas as pd
 

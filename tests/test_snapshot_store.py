@@ -39,3 +39,14 @@ def test_snapshot_backtest_reports_mainline_conversion(tmp_path):
     assert detail.iloc[0]["became_mainline"]
     assert detail.iloc[0]["lead_time_sessions"] == 1
     assert summary.iloc[0]["precision_at_1"] == 1
+
+
+def test_numeric_board_codes_survive_snapshot_reload_and_merge(tmp_path):
+    store = SnapshotStore(tmp_path)
+    first = frame(40, 80)
+    first["code"] = ["881001", "001234"]
+    store.save(first, datetime(2026, 10, 5, 15, 1))
+    reloaded = store._read(store.list()[0])
+    assert reloaded["code"].tolist() == ["881001", "001234"]
+    enriched = store.enrich(first, datetime(2026, 10, 6, 15, 1))
+    assert enriched["breadth_delta_1d"].eq(0).all()

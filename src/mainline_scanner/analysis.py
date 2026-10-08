@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import hashlib
 
-from .snapshot_store import add_amount_share
+from .snapshot_store import add_amount_share, MODEL_VERSION
+from .quant_scores import MARKET_CONFIRMATION_WEIGHTS, EXHAUSTION_WEIGHTS
 
 
 def _return(close: pd.Series, days: int) -> float:
@@ -82,6 +84,7 @@ def calculate_board_metrics(history: pd.DataFrame) -> dict[str, float | str | pd
         "turnover_ratio_5_20": float(turnover.tail(5).mean() / turnover20) if turnover20 and np.isfinite(turnover20) else np.nan,
         "drawdown_10d": float((close.iloc[-1] / close.tail(10).cummax() - 1).min() * 100),
         "history_days": len(h),
+        "history_source": str(h["data_source"].iloc[-1]) if "data_source" in h else "原始板块日线",
     }
     # 外部主力资金接口不可用时，CMF 只作为量价代理，不冒充真实主力净流入。
     if {"high", "low", "amount"}.issubset(h.columns):
@@ -118,7 +121,21 @@ def build_metric_table(
     if out.empty:
         return out
     if not flows.empty:
-        out = out.merge(flows, on=["kind", "name"], how="left")
+        if "code" in flows:
+            flow_frame = flows.copy()
+            flow_frame["code"] = flow_frame["code"].astype(str)
+            flow_frame = flow_frame.drop(columns=["name"], errors="ignore").drop_duplicates(["kind", "code"])
+            out = out.merge(flow_frame, on=["kind", "code"], how="left")
+            out["flow_match_method"] = "verified_code"
+            if "目录来源" in out:
+                incompatible = ~out["目录来源"].fillna("东方财富").astype(str).eq("东方财富")
+                for col in [c for c in out if c.startswith("flow_") and (c.endswith("_pct") or c.endswith("_amount"))]:
+                    out.loc[incompatible, col] = np.nan
+                out.loc[incompatible, "flow_match_method"] = "source_namespace_mismatch"
+        else:
+            unique_flows = flows.drop_duplicates(["kind", "name"], keep=False)
+            out = out.merge(unique_flows, on=["kind", "name"], how="left")
+            out["flow_match_method"] = "unique_name_unverified"
     for window in (1, 5, 10):
         flow_col = f"flow_{window}d_pct"
         proxy_col = f"flow_proxy_{window}d_pct"
@@ -157,30 +174,52 @@ def build_metric_table(
 def _rank01(s: pd.Series, higher_is_better: bool = True, neutral: float = 0.5) -> pd.Series:
     numeric = pd.to_numeric(s, errors="coerce")
     ranked = numeric.rank(pct=True, method="average", ascending=higher_is_better)
-    return ranked.fillna(neutral)
+    return ranked
 
 
 def _weighted_score(
     group: pd.DataFrame,
     weights: dict[str, float],
     pre_ranked: set[str] | None = None,
-) -> pd.Series:
+) -> pd.DataFrame:
     score = pd.Series(0.0, index=group.index)
-    weight_sum = 0.0
+    available = pd.Series(0.0, index=group.index)
+    contributions = {}
     pre_ranked = pre_ranked or set()
     for col, weight in weights.items():
         if col in group:
-            signal = pd.to_numeric(group[col], errors="coerce").fillna(.5) if col in pre_ranked else _rank01(group[col])
-            score += signal * weight
-            weight_sum += weight
-    return score / weight_sum * 100 if weight_sum else score
+            signal = pd.to_numeric(group[col], errors="coerce") if col in pre_ranked else _rank01(group[col])
+            contributions[f"{col}_contribution"] = signal * weight * 100
+            score += signal.fillna(0) * weight
+            available += signal.notna().astype(float) * weight
+    raw = score.div(available.replace(0, np.nan)) * 100
+    coverage = available / sum(weights.values())
+    result = pd.DataFrame({"raw_score": raw, "coverage": coverage,
+                           "rank_score": 50 + (raw - 50) * coverage}, index=group.index)
+    return result.assign(**contributions)
+
+
+def _grouped_score(group: pd.DataFrame, groups: dict[str, tuple[float, dict[str, float]]],
+                   pre_ranked: set[str] | None = None) -> pd.DataFrame:
+    numerator = pd.Series(0.0, index=group.index)
+    covered = pd.Series(0.0, index=group.index)
+    parts: dict[str, pd.Series] = {}
+    for name, (weight, factors) in groups.items():
+        component = _weighted_score(group, factors, pre_ranked)
+        effective = weight * component["coverage"]
+        numerator += component["raw_score"].fillna(0) * effective
+        covered += effective
+        parts[f"{name}_contribution"] = component["raw_score"] * effective
+    raw = numerator.div(covered.replace(0, np.nan))
+    return pd.DataFrame({"raw_score": raw, "coverage": covered,
+                         "rank_score": 50 + (raw - 50) * covered, **parts}, index=group.index)
 
 
 def _source_adjusted_flow_rank(group: pd.DataFrame, window: int) -> pd.Series:
     value_col = f"flow_{window}d_pct"
     source_col = f"flow_{window}d_source"
     confidence_col = f"flow_{window}d_confidence"
-    result = pd.Series(.5, index=group.index, dtype=float)
+    result = pd.Series(np.nan, index=group.index, dtype=float)
     if value_col not in group:
         return result
     sources = group[source_col] if source_col in group else pd.Series("未知", index=group.index)
@@ -188,14 +227,14 @@ def _source_adjusted_flow_rank(group: pd.DataFrame, window: int) -> pd.Series:
     confidence = pd.to_numeric(raw_confidence, errors="coerce").fillna(0)
     for source in sources.dropna().unique():
         mask = sources == source
-        ranked = _rank01(group.loc[mask, value_col]) if int(mask.sum()) >= 3 else pd.Series(.5, index=group.index[mask])
+        ranked = _rank01(group.loc[mask, value_col]) if int(mask.sum()) >= 3 else pd.Series(.5, index=group.index[mask]).where(group.loc[mask, value_col].notna())
         result.loc[mask] = .5 + (ranked - .5) * confidence.loc[mask]
     return result
 
 
 def _source_adjusted_acceleration_rank(group: pd.DataFrame) -> pd.Series:
     """资金加速度也必须按同一数据来源内部比较，避免 CMF 与东方财富口径混排。"""
-    result = pd.Series(.5, index=group.index, dtype=float)
+    result = pd.Series(np.nan, index=group.index, dtype=float)
     if "flow_acceleration" not in group:
         return result
     sources = group.get("flow_acceleration_source", pd.Series("未知", index=group.index)).astype(str)
@@ -233,12 +272,18 @@ def _ignition_history_coverage(frame: pd.DataFrame) -> pd.Series:
 def score_boards(metrics: pd.DataFrame) -> pd.DataFrame:
     if metrics.empty:
         return metrics
+    metrics = metrics.copy()
+    if "history_source" not in metrics:
+        metrics["history_source"] = "来源未标记"
     frames = []
-    main_weights = {
-        "ret_5d": .11, "ret_10d": .12, "slope_5d": .14, "slope_10d": .07,
-        "trend_r2_10d": .07, "rs_10d": .10, "flow_5d_signal": .12,
-        "flow_10d_signal": .06, "breadth": .08, "amount_ratio_5_20": .07,
-        "positive_days_10": .06,
+    main_groups = {
+        "trend": (.28, {"ret_5d": .25, "ret_10d": .25, "slope_5d": .25,
+                          "slope_10d": .15, "trend_r2_10d": .10}),
+        "relative_strength": (.20, {"rs_10d": 1.0}),
+        "volume": (.22, {"flow_5d_signal": .45, "flow_10d_signal": .25,
+                           "amount_ratio_5_20": .30}),
+        "breadth": (.15, {"breadth": 1.0}),
+        "persistence": (.15, {"positive_days_10": 1.0}),
     }
     candidate_weights = {
         "acceleration": .18, "slope_3d": .13, "rs_5d": .09,
@@ -258,21 +303,42 @@ def score_boards(metrics: pd.DataFrame) -> pd.DataFrame:
         "acceleration": .10,
         "amount_ratio_5_20": .06,
         "ret_1d": .04,
+        "historical_rank_change_3d": .10,
+        "top_rank_days_10": .08,
     }
-    for _, g in metrics.groupby("kind", sort=False):
+    config_hash = hashlib.sha256(repr((main_groups, candidate_weights, ignition_weights,
+                                       MARKET_CONFIRMATION_WEIGHTS, EXHAUSTION_WEIGHTS,
+                                       .65, .45, 80, 72, "same-source-v1")).encode()).hexdigest()[:16]
+    for _, g in metrics.groupby(["kind", "history_source"], sort=False):
         x = g.copy()
+        x["comparison_peer_count"] = len(x)
+        x["model_version"] = MODEL_VERSION
+        x["config_hash"] = config_hash
+        if "breadth" not in x:
+            x["breadth"] = np.nan
+        if "history_source" not in x:
+            x["history_source"] = "来源未标记"
+        if "history_days" not in x:
+            x["history_days"] = 0
+        for days in (5, 10, 20):
+            ret_col = f"ret_{days}d"
+            if ret_col in x:
+                x[f"rs_{days}d"] = pd.to_numeric(x[ret_col], errors="coerce") - pd.to_numeric(x[ret_col], errors="coerce").median()
         for window in (1, 5, 10):
             x[f"flow_{window}d_signal"] = _source_adjusted_flow_rank(x, window)
         x["flow_acceleration_signal"] = _source_adjusted_acceleration_rank(x)
-        x["mainline_score"] = _weighted_score(x, main_weights, {"flow_5d_signal", "flow_10d_signal"})
-        x["confirmation_score"] = _weighted_score(
-            x, candidate_weights, {"flow_1d_signal", "flow_acceleration_signal"}
-        )
+        main = _grouped_score(x, main_groups, {"flow_5d_signal", "flow_10d_signal"})
+        x["mainline_raw_score"], x["mainline_coverage"], x["mainline_score"] = main["raw_score"], main["coverage"], main["rank_score"]
+        confirmation = _weighted_score(x, candidate_weights, {"flow_1d_signal", "flow_acceleration_signal"})
+        x["confirmation_raw_score"], x["confirmation_coverage"], x["confirmation_score"] = confirmation["raw_score"], confirmation["coverage"], confirmation["rank_score"]
+        for col in main.filter(like="_contribution"):
+            x[f"mainline_{col}"] = main[col]
         crowding = ((x["distance_ma20"] - 12).clip(lower=0) * 0.7 + (x["ret_10d"] - 18).clip(lower=0) * 0.5).clip(upper=18)
         x["crowding_penalty"] = crowding.fillna(0)
         x["confirmation_score"] = (x["confirmation_score"] - x["crowding_penalty"]).clip(0, 100)
         x["candidate_score"] = x["confirmation_score"]
-        x["ignition_score"] = _weighted_score(x, ignition_weights, {"flow_acceleration_signal"})
+        ignition = _weighted_score(x, ignition_weights, {"flow_acceleration_signal"})
+        x["ignition_raw_score"], x["ignition_coverage"], x["ignition_score"] = ignition["raw_score"], ignition["coverage"], ignition["rank_score"]
         early_crowding = ((x["ret_5d"] - 8).clip(lower=0) * .9 + (x["ret_10d"] - 15).clip(lower=0) * .45).clip(upper=22)
         x["ignition_score"] = (x["ignition_score"] - early_crowding.fillna(0)).clip(0, 100)
         x["ignition_history_coverage"] = _ignition_history_coverage(x)
@@ -297,8 +363,26 @@ def score_boards(metrics: pd.DataFrame) -> pd.DataFrame:
         x.loc[box_ok & (x["sideways_seed_score"] >= 60), "sideways_seed_status"] = "横盘观察"
         x.loc[box_ok & (x["sideways_seed_score"] >= 70), "sideways_seed_status"] = "横盘火种"
 
-        main_ok = (x["slope_5d"] > 0) & (x["ret_10d"] > 0) & (x.get("breadth", .5).fillna(.5) >= .45)
+        breadth = pd.to_numeric(x.get("breadth", pd.Series(np.nan, index=x.index)), errors="coerce")
+        synthetic = x["history_source"].astype(str).str.contains("合成")
+        main_ok = ((x["slope_5d"] > 0) & (x["ret_10d"] > 0)
+                   & (breadth.isna() | (breadth >= .45)) & (x["mainline_coverage"] >= .65)
+                   & ~synthetic & (x["comparison_peer_count"] >= 3))
+        x["mainline_gate_passed"] = main_ok
+        x["mainline_blockers"] = ["；".join(reason for reason, failed in (
+            ("5日趋势未上行", row.slope_5d <= 0), ("10日绝对收益未转正", row.ret_10d <= 0),
+            ("上涨广度不足", pd.notna(row.breadth) and row.breadth < .45),
+            ("评分覆盖率不足", row.mainline_coverage < .65),
+            ("合成指数不可直接确认", "合成" in str(row.history_source)),
+            ("同源可比板块不足3个", row.comparison_peer_count < 3),
+            ("确认分不足80", row.mainline_score < 80),
+        ) if failed) for row in x.itertuples()]
+        x["structure_status"] = np.where(breadth.notna(), "广度已验证", "成分结构未验证")
         candidate_ok = (x["slope_3d"] > 0) & (x["acceleration"] > 0) & (x["ret_10d"] < 18)
+        x["absolute_strength_state"] = np.select(
+            [(x["ret_5d"] > 0) & (x["slope_5d"] > 0),
+             (x["ret_5d"] <= 0) & (x["rs_5d"] > 0)],
+            ["绝对上行", "防御强势"], default="尚未上行")
         x["status"] = "普通"
         x.loc[(x["confirmation_score"] >= 65) & candidate_ok, "status"] = "值得关注"
         x.loc[(x["confirmation_score"] >= 75) & candidate_ok, "status"] = "潜在启动"
@@ -306,7 +390,7 @@ def score_boards(metrics: pd.DataFrame) -> pd.DataFrame:
         x.loc[(x["mainline_score"] >= 80) & main_ok, "status"] = "主线核心"
 
         # Seed/Ignition 是轨迹型标签；至少 40% 的轨迹字段可用才允许进入。
-        trajectory_ok = x["ignition_history_coverage"] >= .40
+        trajectory_ok = (x["ignition_history_coverage"] >= .40) | (x["history_days"] >= 20)
         x["lifecycle"] = "Dormant"
         x.loc[(x["mainline_score"] >= 62) & main_ok, "lifecycle"] = "Diffusion"
         x.loc[(x["ignition_score"] >= 60) & (x["ret_5d"] < 8) & trajectory_ok, "lifecycle"] = "Seed"
@@ -314,5 +398,12 @@ def score_boards(metrics: pd.DataFrame) -> pd.DataFrame:
         x.loc[(x["mainline_score"] >= 80) & main_ok, "lifecycle"] = "Mainline"
         x.loc[(x["crowding_penalty"] >= 8) & (x["mainline_score"] >= 65), "lifecycle"] = "Crowded"
         x.loc[(x["mainline_score"] >= 60) & (x["slope_3d"] < 0) & (x["acceleration"] < 0), "lifecycle"] = "Decay"
+        historical_jump = pd.to_numeric(x.get("historical_rank_change_3d", pd.Series(np.nan, index=x.index)), errors="coerce")
+        x["miss_diagnosis"] = np.select(
+            [(x["ignition_score"] >= 70) & ~x["lifecycle"].eq("Mainline"),
+             historical_jump >= .25,
+             (x["amount_ratio_5_20"] >= 1.3) & (x["ret_5d"] < 3),
+             x["mainline_coverage"] < .65],
+            ["高火种未确认", "排名快速上升", "量能领先", "数据不足"], default="")
         frames.append(x)
     return pd.concat(frames, ignore_index=True).sort_values("mainline_score", ascending=False)

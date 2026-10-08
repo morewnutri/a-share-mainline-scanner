@@ -20,13 +20,13 @@ def test_colab_scan_displays_sideways_seed_table_and_chart():
     assert "横盘火种雷达.png" in scan
 
 
-def test_colab_scan_displays_research_radars_and_passes_optional_data():
+def test_colab_scan_displays_quant_radars_and_snapshot_archive():
     scan = (ROOT / "colab" / "run_scan.py").read_text(encoding="utf-8")
-    for title in ("研究潜在主线", "市场确认主线", "主线切换", "退潮风险"):
+    for title in ("量化火种", "市场确认主线", "主线切换", "退潮风险", "结构强势", "潜在漏检诊断"):
         assert f"{title}.csv" in scan
-    assert "--research-signals" in scan
     assert "--market-history" in scan
-    assert "potential_coverage" in scan
+    assert "SNAPSHOT_ARCHIVE_IN" in scan
+    assert "SNAPSHOT_ARCHIVE_OUT" in scan
 
 
 def test_colab_valuation_uses_scan_output():

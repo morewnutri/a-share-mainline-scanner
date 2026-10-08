@@ -1,12 +1,10 @@
-"""Google Colab runner: scan, then display tables and charts inline.
-
-All files stay under /content; Google Drive is neither mounted nor required.
-"""
+"""Google Colab runner with optional snapshot ZIP import/export."""
 from __future__ import annotations
 
 import subprocess
 import sys
 import os
+import zipfile
 from pathlib import Path
 
 # ===== 可修改配置 =====
@@ -16,8 +14,9 @@ LOOKBACK_CALENDAR_DAYS = 120
 REFRESH = False
 SCAN_ALL_SOURCE_BOARDS = True
 BAOSTOCK_MODE = "off"  # industry 较慢；all 还会合成概念，首次运行可能很慢
-RESEARCH_SIGNALS_FILE = Path("/content/board_signals.csv")  # 可选：带 available_at 的研究证据
 MARKET_HISTORY_FILE = Path("/content/market_daily.csv")  # 可选：独立全A成交额/基准
+SNAPSHOT_ARCHIVE_IN = None  # 如 Path('/content/snapshots-in.zip')
+SNAPSHOT_ARCHIVE_OUT = Path('/content/a-share-mainline-snapshots.zip')
 # ====================
 
 
@@ -55,6 +54,13 @@ def main() -> None:
     output_dir = Path("/content/a-share-mainline-results")
     for path in (cache_dir, snapshot_dir, output_dir):
         path.mkdir(parents=True, exist_ok=True)
+    if SNAPSHOT_ARCHIVE_IN and Path(SNAPSHOT_ARCHIVE_IN).is_file():
+        with zipfile.ZipFile(SNAPSHOT_ARCHIVE_IN) as archive:
+            for member in archive.infolist():
+                if member.filename.endswith('.csv.gz') and Path(member.filename).name == member.filename:
+                    (snapshot_dir / member.filename).write_bytes(archive.read(member))
+    else:
+        print('未导入历史快照：跨交易日切换信号可能缺失。Colab /content 在会话结束后不持久保存。')
 
     command = [
         sys.executable, "-m", "mainline_scanner.cli",
@@ -72,10 +78,6 @@ def main() -> None:
         command.append("--refresh")
     if SCAN_ALL_SOURCE_BOARDS:
         command.extend(["--exclude-regex", ""])
-    if RESEARCH_SIGNALS_FILE.is_file():
-        command.extend(["--research-signals", str(RESEARCH_SIGNALS_FILE)])
-    else:
-        print("研究证据文件缺失：潜在主线分将为空；可将 board_signals.csv 上传到 /content。")
     if MARKET_HISTORY_FILE.is_file():
         command.extend(["--market-history", str(MARKET_HISTORY_FILE)])
     else:
@@ -87,6 +89,10 @@ def main() -> None:
         if scan_result.stderr:
             print(scan_result.stderr[-12000:], file=sys.stderr)
         raise RuntimeError(f"扫描器退出码 {scan_result.returncode}；上方是原始日志和异常。")
+    with zipfile.ZipFile(SNAPSHOT_ARCHIVE_OUT, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in snapshot_dir.glob('*.csv.gz'):
+            archive.write(path, path.name)
+    print(f'历史快照 ZIP 已导出：{SNAPSHOT_ARCHIVE_OUT}。请下载保存，下次运行时设置 SNAPSHOT_ARCHIVE_IN。')
 
     import pandas as pd
 
@@ -96,7 +102,7 @@ def main() -> None:
         r"[ⅠⅡⅢⅣⅤⅰⅱⅲⅳⅴ]+$", "", regex=True,
     )
 
-    def show_research_rank(title: str, filename: str, rank_col: str, wanted: list[str]) -> None:
+    def show_quant_rank(title: str, filename: str, rank_col: str, wanted: list[str]) -> None:
         display(Markdown(f"## {title}"))
         path = output_dir / filename
         if not path.is_file():
@@ -104,9 +110,7 @@ def main() -> None:
             return
         table = pd.read_csv(path)
         if rank_col not in table or table[rank_col].notna().sum() == 0:
-            reason = "尚无按时点记录的盈利/产业/政策证据" if rank_col == "potential_rank_score" else (
-                "需要连续交易日快照" if rank_col == "switch_score" else "当前缺少可计算的观测数据"
-            )
+            reason = "需要不同交易日且模型版本一致的快照" if rank_col == "switch_score" else "当前缺少可计算的观测数据"
             display(Markdown(f"本次无有效排名：{reason}。完整板块仍保留在 `{filename}`。"))
             return
         table["_display_group"] = table["name"].astype(str).str.replace(
@@ -115,36 +119,44 @@ def main() -> None:
         table = table.drop_duplicates(["kind", "_display_group"])
         display(table[[col for col in wanted if col in table]].head(30))
 
-    show_research_rank("研究潜在主线 Top 30", "研究潜在主线.csv", "potential_rank_score", [
-        "kind", "code", "name", "research_phase", "potential_rank_score", "potential_score",
-        "potential_coverage", "potential_state", "market_confirmation_score", "geo_net_exposure",
+    show_quant_rank("量化火种 Top 30", "量化火种.csv", "ignition_score", [
+        "kind", "code", "name", "ignition_score", "ignition_coverage",
+        "historical_rank_change_3d", "mainline_blockers", "人工核查提醒",
     ])
-    show_research_rank("市场确认主线 Top 30", "市场确认主线.csv", "market_confirmation_rank_score", [
-        "kind", "code", "name", "research_phase", "market_confirmation_rank_score",
-        "market_confirmation_score", "confirmation_coverage", "top_rank_days_10",
+    show_quant_rank("市场确认主线 Top 30", "市场确认主线.csv", "market_confirmation_rank_score", [
+        "kind", "code", "name", "quant_phase", "market_confirmation_rank_score",
+        "market_confirmation_score", "market_confirmation_coverage", "top_rank_days_10",
         "turnover_share", "rs_market_5d", "breadth",
     ])
-    show_research_rank("主线切换 Top 30", "主线切换.csv", "switch_score", [
+    show_quant_rank("主线切换 Top 30", "主线切换.csv", "switch_score", [
         "kind", "code", "name", "switch_score", "switch_from", "confirmation_change",
-        "turnover_change", "market_confirmation_score", "potential_score",
+        "turnover_change", "market_confirmation_score",
     ])
-    show_research_rank("退潮风险 Top 30", "退潮风险.csv", "exhaustion_rank_score", [
+    show_quant_rank("退潮风险 Top 30", "退潮风险.csv", "exhaustion_rank_score", [
         "kind", "code", "name", "exhaustion_rank_score", "exhaustion_score",
-        "exhaustion_coverage", "risk_breadth_divergence", "risk_leader_divergence",
-        "risk_turnover_efficiency_loss", "risk_failure_rate", "risk_catalyst_exhaustion",
+        "exhaustion_coverage", "risk_trend", "risk_relative", "risk_volume",
+    ])
+    show_quant_rank("结构强势 Top 30", "结构强势.csv", "structure_score", [
+        "kind", "code", "name", "structure_score", "structure_status", "structure_coverage", "structure_breadth", "limit_up_density",
+    ])
+    show_quant_rank("潜在漏检诊断 Top 30", "潜在漏检诊断.csv", "ignition_score", [
+        "kind", "code", "name", "ignition_score", "lifecycle", "mainline_blockers", "人工核查提醒",
     ])
     columns = [
         "kind", "name", "lifecycle", "mainline_score", "ignition_score", "confirmation_score",
         "ret_1d", "ret_5d", "ret_10d", "slope_3d", "slope_5d",
         "acceleration", "flow_1d_pct", "flow_5d_pct", "breadth",
-        "flow_1d_source", "flow_5d_source",
+        "flow_1d_source", "flow_5d_source", "mainline_coverage", "mainline_blockers", "人工核查提醒",
     ]
     columns = [col for col in columns if col in scored]
     display(Markdown("## 当前主线 Top 30"))
     main_rank = display_scored[
-        display_scored["status"].astype(str).str.startswith("主线")
+        display_scored["lifecycle"].eq("Mainline")
     ].sort_values("mainline_score", ascending=False).drop_duplicates(["kind", "_display_group"])
-    display(main_rank[columns].head(30))
+    if main_rank.empty:
+        display(Markdown("本次暂无满足确认条件的主线。"))
+    else:
+        display(main_rank[columns].head(30))
     display(Markdown("## 火种 / 点火 Top 30"))
     candidate_rank = display_scored[
         display_scored["lifecycle"].isin(["Seed", "Ignition"])

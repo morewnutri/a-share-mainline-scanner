@@ -1,30 +1,6 @@
-# A股主线生命周期扫描器
+# A股量化主线扫描器（quant-v2）
 
-项目同时保留两条识别路径：
-
-1. **主线确认层**：根据板块趋势、相对强弱、资金、广度、量能与拥挤度识别已经扩散的主线；
-2. **火种发现层**：保存每次评分快照，优先观察排名跃迁、广度扩张、板块成交额份额迁移和同口径资金强度变化，尽量在过去 5 日涨幅仍不高时发现 `Seed / Ignition`；
-3. **横盘火种层**：独立筛选处于 60 日区间低位、20 日窄箱体、低斜率且波动收缩的行业或概念，不要求它已经出现动量点火。
-
-生命周期输出为：
-
-```text
-Dormant → Seed → Ignition → Diffusion → Mainline → Crowded / Decay
-```
-
-`candidate_score` 为兼容 1.x 保留，等同于新的 `confirmation_score`。真正用于早期雷达的是 `ignition_score`。
-
-## 研究报告四层雷达
-
-扫描现在额外输出 **研究潜在主线、市场确认主线、主线切换、退潮风险** 四张全量排行榜。它们与原有动量火种并行：潜在分只使用当时已公布的盈利、产业、政策、催化和预期差信号；市场确认分使用成交、相对强度、广度、持续性、龙头梯队、流动性和低权重关注度；退潮分和切换分独立展示。
-
-```powershell
-mainline-scanner --lookback-calendar-days 120 --market-history data/input/market_daily.csv --research-signals data/input/board_signals.csv
-```
-
-`--market-history` 至少需要 `date,market_amount`，可加 `benchmark_close`。成交额应与板块日线同单位；工具不会把重叠概念的成交额总和当成全 A 市场成交额。若提供个股成交额汇总 `stock_amount_sum`，将逐日与独立全市场成交额核对，默认误差超过 5% 即停止扫描；可用 `--market-reconciliation-tolerance` 调整。可选股票池计数字段会生成 `全A数据质量.csv`。若没有该文件，则保留自身成交异常作为低信息量候选信号，真实 `turnover_share` 留空。`--research-signals` 需要 `kind,code,available_at`，可加 `published_at` 和报告涉及的各项 0–1 证据分；见 [字段和时点规则](docs/research_signal_schema.md)。没有外部证据时 `potential_score` 为缺失，板块仍保留在四张榜中，`potential_state` 标明“基本面资料待补”。
-
-这些权重来自研究报告的初始假设，并未被证明最优。**覆盖率列**显示分数依据的实际可用权重；各榜优先用 `*_rank_score = 50 + (score-50) × coverage` 排序，让低覆盖的极端值向中性收缩，不直接淘汰板块。默认不按 15% 成交占比、涨停家数、80 分或固定龙头连板数淘汰板块。`--exclude-regex` 默认空，用户需要时才主动过滤。已保存的历史快照会继续提供排名和确认分变化；首次运行的切换信号缺少历史轨迹。
+扫描行业和概念板块的**已确认主线、量化火种、横盘潜伏、结构强势、主线切换与退潮风险**。分数只使用可自动观测、可核对交易日、可复算的行情数据。政策、供需、订单、业绩预期和产业事件以“未检查”的固定清单展示，不参与评分、排名或生命周期。
 
 ## 安装与运行
 
@@ -33,191 +9,46 @@ python -m pip install -e .
 mainline-scanner
 ```
 
-也可以直接运行模块：
-
-```powershell
-python -m mainline_scanner.cli --board-types industry concept --workers 3
-```
-
 常用参数：
 
 ```powershell
-# 只扫描行业
-mainline-scanner --board-types industry
-
-# 忽略缓存并重抓
-mainline-scanner --refresh
-
-# 每类只扫描前 10 个，用于调试
-mainline-scanner --limit 10
-
-# 启用 BaoStock 行业合成回退
-mainline-scanner --baostock-mode industry
-
-# 行业和概念均尝试按成分股合成；首次运行明显更慢
-mainline-scanner --baostock-mode all --baostock-max-constituents 24
-
-# 扫描后同时回放已有历史快照
-mainline-scanner --backtest
+mainline-scanner --board-types industry concept --workers 3
+mainline-scanner --market-history data/input/market_daily.csv
+mainline-scanner --snapshot-dir data/snapshots --backtest
+mainline-scanner --historical-replay  # 逐交易日重建基础量化信号
+mainline-scanner --structure-candidates 0  # 关闭在线成分股验证
 ```
 
-板块目录优先使用东方财富；直连和 AKShare 均失败时，会切换到同花顺目录及其板块日线。同花顺目录的板块范围和代码与东方财富不同，结果会在 `目录来源` 列标明。东方财富资金流不可用时，评分使用已标注的量价代理。
+默认扫描所有板块。历史日线依次尝试东方财富、同花顺、申万及可选的 BaoStock 合成回退。合成指数会标记来源，不可仅凭其价格信号升级为 `Mainline`。申万请求要求正常 TLS 证书验证。
 
-## 实时与历史缓存
+可选的 `--market-history` CSV 至少包含 `date,market_amount`；可加 `benchmark_close`。成交额应与板块日线同单位。如果提供 `stock_amount_sum`，默认要求它与全市场成交额误差不超过 5%。没有这个文件时，真实全市场成交占比保持缺失，量能以板块自身历史变化衡量。
 
-实时板块列表和资金流默认缓存 **5 分钟**，历史日线默认缓存 **24 小时**，两者不再共用原来的 8 小时 TTL。东方财富实时域名 `push2` 优先，`push2delay` 只作兜底。
+`--research-signals` 仅为旧命令兼容入口，会提示弃用，其文件内容完全不参与计算。`board_signals.csv` 不再是生成火种榜的前提。
+
+## 分数与确认条件
+
+- 主线分按趋势、相对强度、量能、广度、持续性分组，再合并组分。每个分数都有原始分、有效权重覆盖率和排序分：`rank_score = 50 + (raw_score - 50) × coverage`。缺失因子不会填成中性观测。
+- 火种分使用历史日线重建的排名变化、强势持续性、量能与加速度；有跨交易日快照时补充历史确认分和份额变化。首次运行仍可生成火种候选。
+- `Mainline` 还要求 5 日趋势上行、10 日绝对收益为正、已知广度不低于 45%、主线指标覆盖率至少 65%、主线分至少 80，且不是合成指数。`mainline_blockers` 列逐板块列出未达标项。
+- 候选板块的个股结构在收盘后尝试自动验证。全市场个股快照只取一次，成分股只拉取候选；映射与有效行情覆盖率均需达到 70%。来源不可用、日期不一致或覆盖不足时，结构分保持缺失。今天的成分股名单不会用于历史回放。
+- `name`、`lifecycle`、`mainline_score` 保持与估值模块兼容；若评分覆盖不足，估值接口不会把 `Mainline` 当成可信阶段。
+
+这些阈值是待滚动回测校准的初始规则，不是收益预测。`主线判断报告.md`、Excel 和 `板块完整评分.csv` 会显示覆盖率、未入主线原因、结构验证状态及人工核查提醒。无合格主线时，报告明确写“暂无满足确认条件的主线”，不会用普通高分板块回填。
+
+## 日期、缓存与快照
+
+扫描以交易所已完成的收盘交易日为准。盘中扫描仍使用前一已完成交易日，不混入当日未收盘数据。历史缓存除文件时效外，还核对请求起点、预期截止交易日和实际最后行情日期。休市期间多次运行不会制造新的交易日变化。
+
+快照保存 `market_as_of`、`captured_at`、`run_mode`、`model_version`、`config_hash`、`universe_hash` 和数据指纹。跨日比较只使用前一实际交易日、相同模型和配置的收盘快照。同日重复运行会保留文件，但不会算作新的市场观察日。回测只使用完整未来窗口；不足的标为 `censored`，成功标签要求未来正式 `lifecycle == Mainline`。
+
+Colab 脚本位于 `colab/run_scan.py`。它会输出快照 ZIP；请下载并在下次运行前设置 `SNAPSHOT_ARCHIVE_IN`。Colab 的 `/content` 会话结束后通常不会保留历史快照。
+
+## 验证
 
 ```powershell
-mainline-scanner --snapshot-cache-minutes 3 --cache-hours 24
+python -m pytest -q
 ```
 
-每次运行默认在 `data/snapshots/` 保存带时间戳的压缩 CSV。同一日多次运行可形成盘中 `breadth_delta_intraday` 和 `amount_share_delta_intraday`；跨日运行可形成：
+测试覆盖缺失评分、交易日快照、缓存区间、正式生命周期标签、未来窗口删失、主观字段不影响评分、结构覆盖门槛及估值兼容。未附完整历史行情与当时的成分股映射，因此项目尚未宣称量化火种在电池事件或全历史样本中有更好的命中率；需用逐交易日历史回放评估误报与漏检。
 
-- `confirmation_score_rank_velocity_1d/3d`
-- `confirmation_score_delta_1d`
-- `breadth_delta_1d`
-- `amount_share_delta_1d`
-- `snapshot_history_coverage`
-
-首次运行没有历史轨迹，`ignition_score` 只能使用当日异常特征；连续保存快照后才具备完整的早期识别信息。
-
-## 数据源与缺失回退
-
-板块日线依次尝试：
-
-| 顺序 | 数据源 | 适用范围 | 说明 |
-| --- | --- | --- | --- |
-| 1 | 东方财富 | 行业、概念 | 原始板块指数日线；连续探测 3 个板块后才判定端点整体不可用 |
-| 2 | 同花顺 | 行业、概念 | 按标准化名称映射备用指数 |
-| 3 | 申万研究 | 一级/二级行业 | 申万官方行业指数 |
-| 4 | BaoStock 成分股等权合成 | 行业；可选概念 | 不是原始板块指数，明确标记合成来源和有效成分股覆盖率 |
-
-BaoStock 不提供东方财富概念指数，不能直接补齐所有 `BKxxxx`。本项目使用它的个股日线和行业分类构造等权合成指数；`--baostock-mode all` 还会先获取概念成分股，再用 BaoStock 个股日线合成。为了控制免费接口压力，每个板块默认固定抽取最多 24 只成分股，并共享个股缓存。
-
-因此合成回退适合“让板块不完全缺席”和交叉确认，不应与原始指数点位混为一谈。完整性审计新增：
-
-- `history_source=BaoStock成分股等权合成`
-- `synthetic_constituents`
-- `synthetic_coverage`
-
-`--baostock-mode` 默认关闭，避免全量扫描首次运行因数千只个股请求而耗时过长。建议先用 `industry`，确有需要再使用 `all`。
-
-## 资金口径修正
-
-真实主力净流入占比和 CMF 量价代理不再混在同一个横截面直接排名：
-
-- 每种来源分别标准化；
-- CMF 代理按 0.55 置信度向中性值收缩；
-- 真实资金变化采用“今日净流入占比 - 5 日每日均值”；
-- CMF 变化只与 CMF 比较；不同来源组合标记为不可比。
-
-输出保留 `flow_*_source`、`flow_*_confidence` 和 `flow_acceleration_source`，便于二次筛选。
-
-## 火种分与确认分
-
-`ignition_score` 主要使用：
-
-- 1/3 日火种排名跃迁；
-- 确认分变化；
-- 跨日和盘中广度增量；
-- 板块成交额同类份额增量；
-- 同口径资金强度变化；
-- 价格加速度、当日异常和量能扩张。
-
-过去 5/10 日已经大涨会对火种分扣分。`mainline_score` 继续承担主线确认，`confirmation_score` 保留原有短趋势确认逻辑。
-
-注意：当前版本已落地板块轨迹型火种层，但“全 A 个股异常 → 概念反向投票 → 重叠概念聚类”仍属于下一阶段，不能把当前火种分理解成完整的个股异常聚类引擎。
-
-## 横盘火种
-
-`sideways_seed_score` 与动量型 `ignition_score` 相互独立。它综合 20 日箱体振幅、20 日趋势斜率、60 日区间位置、距箱底距离、5/20 日波动收缩和短期破位风险；至少需要 40 个交易日，并使用绝对门槛避免在弱市中仅凭相对排名误报。输出包括：
-
-- `reports/latest/横盘火种.csv`
-- Excel 的“横盘火种”工作表
-- `reports/latest/横盘火种雷达.png`
-- Markdown/HTML 报告中的“横盘火种（低位箱体）”章节
-
-## 历史回放
-
-积累至少数日快照后运行：
-
-```powershell
-mainline-backtest --snapshot-dir data/snapshots --output-dir reports/backtest
-```
-
-输出 `火种信号回放明细.csv` 和 `火种信号回放汇总.csv`，评估：
-
-- `precision_at_10`
-- `false_start_rate`
-- `median_lead_time_sessions`
-- `median_alert_ret_5d`
-- `mean_forward_rs_3d/5d/10d`
-
-这是对扫描器“是否提前发现”的评估，不是买卖收益回测。
-
-同时输出 `未来主线标签明细.csv`、`未来主线标签汇总.csv`：只对未来完整 20 个交易日的快照构造相对成交占比排名、超额收益、强势天数、广度和最大回撤的综合标签，并评估潜在主线榜的前 K 命中率。标签只用于回放评价，不参与当日预测。免费概念历史成分可能被后续调整，历史标签仍有成分时点限制；至少积累 21 天快照才能生成首个完整标签。
-
-## 输出文件
-
-默认输出到 `reports/latest/`：
-
-- `板块完整评分.csv`
-- `研究潜在主线.csv`、`市场确认主线.csv`、`主线切换.csv`、`退潮风险.csv`
-- `横盘火种.csv`
-- `板块主线扫描.xlsx`（含“火种雷达”和“横盘火种”工作表）
-- `主线雷达.png`
-- `横盘火种雷达.png`
-- `领先板块走势.png`
-- `主线判断报告.md/.html`
-- `数据完整性审计.xlsx`
-- `遗漏板块明细.csv`
-
-## 风险约束估值与仓位区间
-
-估值扫描器现在按以下链路输出可审计结果：
-
-```text
-TTM来源与置信度 → 数据质量门槛 → 模型族公允价 → point-in-time残差
-→ Quantile/MAD交易带 → 动态安全边际 → 主线生命周期仓位门槛
-```
-
-运行：
-
-```powershell
-valuation-scanner --no-prompt
-
-# 指定主线扫描结果；默认即为 reports/latest/板块完整评分.csv
-valuation-scanner --mainline-csv reports/latest/板块完整评分.csv --no-prompt
-```
-
-关键约束：
-
-- 配置加载时校验 JSON、股票代码、名称、行业和模型引用，未知模型返回 `MODEL_UNRESOLVED / NO_TRADE`，不再静默套用通用 PE。
-- TTM 明确区分 `EXACT_TTM`、`ANNUALIZED_Q1/H1/Q3`、`QUOTE_PROVIDER_PE` 和 `MISSING`；数据越弱，公允区间和安全边际越大。
-- 板块同时输出 `aggregate_pe`、`positive_profit_pe`、`profitable_mcap_coverage`、`loss_mcap_share`，并分别输出 PE/PB/PS 市值覆盖率。盈利市值覆盖不足 70% 时 PE 被禁用。
-- PE、PB、PS 只在具备独立锚时参与组合：PE 使用正常化增长，PS 使用收入增长/利润率锚，PB 使用 ROE/资产锚；不再把 `fair_pe × margin/ROE` 重复包装成多个模型。有效模型权重低于 70% 时拒绝交易。
-- 个股公允价使用独立模型隐含价格的加权几何平均，并展开原始隐含价、配置权重、有效权重和丢弃原因；历史倍数按有效样本量进行 log-space shrinkage。
-- 自建 sector/stock 快照记录 `valuation_model_version`、`config_hash` 和板块 `universe_hash`，旧模型或旧成分历史不会进入新估值。交易日期来自上交所交易日历和 `quote_trade_date`，不再把普通工作日当成交易日。
-- A 股估值行情优先使用 AKShare/东方财富，其次直连东方财富；两者均不可用时改用新浪财经完整行情。新浪总市值从万元换算为元，且不把口径不明的新浪 PE 当作东方财富动态 PE。实际行情源写入 `quote_source` 和 `数据抓取审计.csv`；新浪分页不完整时拒绝使用。
-- `MODEL_PRIOR_BANDS` 与估值置信度分开，残差历史未成熟时目标仓位上限为 30%；业绩门槛失败为零仓位，观察门槛和 Decay 在所有价格区间都会降仓。
-- `buy_price` 同时受历史低分位和绝对安全价值约束；最终给出目标仓位、主线阶段、动作和 `action_reason`，而不是只有 BUY/SELL 标签。
-
-主要个股输出字段包括公允价上下沿/中心、深度建仓/建仓/减仓/退出价、估值分位、Robust-Z、动态安全边际、数据质量、TTM 方法、历史状态、现金转化、毛利率/ROE 趋势、主线阶段、目标仓位和最终动作。历史接口失败与配置名称/市场名称不一致会进入 `估值风险告警.csv` 和 Excel 告警工作表。
-
-> OCF 模型明确标记为 `OCF_YIELD_PROXY`。免费源目前没有稳定、完整的资本开支口径，因此它不是伪装成精确 FCFF 的现金流模型。
-
-## Google Colab
-
-```python
-!git clone https://github.com/morewnutri/a-share-mainline-scanner.git
-%cd /content/a-share-mainline-scanner
-%run colab/run_scan.py
-```
-
-`colab/run_scan.py` 与 `colab/run_valuation.py` 均只使用 Colab 本地 `/content`，不会挂载或依赖 Google Drive。扫描脚本会直接显示主线、动量火种、横盘火种、完整性审计及三张图；估值脚本应使用 `%run colab/run_valuation.py`，以便 notebook 中的新增股票输入框正常工作。会话结束后 `/content` 会被清除，需要留存时请手动下载。可在扫描脚本顶部设置 `BAOSTOCK_MODE = "industry"` 或 `"all"`。
-
-## 使用边界
-
-免费网页接口可能变更或限流；程序有重试、缓存、跨源回退和逐板块审计。概念板块高度重叠，成交额份额适合观察同一板块随时间的变化，不代表互斥市场份额。结果是发现与排序工具，不构成投资建议。
-
-接口说明可参考 [AKShare 股票数据文档](https://akshare.akfamily.xyz/data/stock/stock.html) 与 [BaoStock 官方站点](http://baostock.com/)。
+`--historical-replay` 只使用截至每个交易日的板块日线和已提供的市场日线，排除当前资金流和当前成分股数据。它使用**当前板块目录**，因此仍有板块存续偏差；完整研究级回测需要历史目录版本。

@@ -3,15 +3,15 @@
 先确保本目录的改动已经提交并推送到 GitHub，然后在 Colab 中运行：
 
 ```python
-!git clone https://github.com/morewnutri/a-share-mainline-scanner.git
+!git clone --branch codex/quant-v2-refactor https://github.com/morewnutri/a-share-mainline-scanner.git
 %cd /content/a-share-mainline-scanner
 !ls -la colab
 %run colab/run_scan.py
 ```
 
-脚本默认扫描行业和概念源全集、不应用概念过滤规则。缓存、快照和报告均保存在 Colab 本地 `/content`，不挂载也不需要 Google Drive；会话结束后这些临时文件会被清除。研究潜在主线、市场确认、切换、退潮四榜，以及原有主线、动量火种、横盘火种和图表均会直接显示。无研究证据时，潜在分为空；首次扫描无历史快照时，切换/火种可能没有有效排名。日线按“东方财富 → 同花顺 → 申万研究一级/二级行业”回退；真实主力资金不可用时会显示明确标注的 CMF 量价代理。脚本按 Noto CJK 字体文件绝对路径注册中文字体；若仍遇到限流，把 `run_scan.py` 顶部的 `WORKERS` 改为 `1` 后重跑。
+脚本默认扫描行业和概念源全集，展示量化火种、确认主线、结构强势、切换、退潮、漏检诊断与横盘火种。政策、供需、订单等只显示为“未检查”的人工提醒。首次扫描即使没有历史快照，也能利用日线生成部分火种信号；切换仍需跨交易日快照。日线按“东方财富 → 同花顺 → 申万研究一级/二级行业”回退；真实主力资金不可用时会显示明确标注的 CMF 量价代理。脚本按 Noto CJK 字体文件绝对路径注册中文字体；若遇到限流，把 `run_scan.py` 顶部的 `WORKERS` 改为 `1` 后重跑。
 
-可选上传 `/content/board_signals.csv` 和 `/content/market_daily.csv`，脚本会自动传给扫描器。字段见项目根目录 `docs/research_signal_schema.md`。运行时会打印 Git 提交短哈希，便于确认 Colab 使用的是目标分支。
+可选上传 `/content/market_daily.csv` 提供独立全市场成交额和基准指数。`board_signals.csv` 不再参与评分。每次运行会把快照打包到 `/content/a-share-mainline-snapshots.zip`；请下载保存。下次上传后，把 `run_scan.py` 顶部的 `SNAPSHOT_ARCHIVE_IN` 设为上传文件路径。未导入时脚本会警告，`/content` 不保证跨会话保留。运行时会打印 Git 提交短哈希。
 
 查看遗漏板块：
 

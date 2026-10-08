@@ -14,7 +14,7 @@ def test_history_falls_back_to_ths_when_eastmoney_fails(tmp_path):
     provider._eastmoney_history_available = True
     provider._direct_history = lambda *args: (_ for _ in ()).throw(ConnectionError("blocked"))
     provider._ths_history = lambda *args: pd.DataFrame({
-        "日期": pd.date_range("2025-01-01", periods=20, freq="B").strftime("%Y%m%d"),
+        "日期": pd.date_range("2025-02-03", periods=20, freq="B").strftime("%Y%m%d"),
         "开盘": range(100, 120), "最高": range(101, 121), "最低": range(99, 119),
         "收盘": range(100, 120), "成交量": range(1000, 1020), "成交额": range(2000, 2020),
         "数据源": ["同花顺"] * 20,
@@ -24,6 +24,18 @@ def test_history_falls_back_to_ths_when_eastmoney_fails(tmp_path):
     assert len(result) == 20
     assert result["data_source"].eq("同花顺").all()
     assert result["close"].iloc[-1] == 119
+
+
+def test_stale_nonempty_primary_history_falls_back(tmp_path):
+    provider = object.__new__(EastmoneyAkshareProvider)
+    provider.cache_dir = tmp_path
+    provider.refresh = True
+    provider.ttl = timedelta(hours=1)
+    provider._eastmoney_history_available = True
+    provider._direct_history = lambda *args: pd.DataFrame({"日期": ["2025-02-27"], "收盘": [100]})
+    provider._ths_history = lambda *args: pd.DataFrame({"日期": ["2025-02-28"], "收盘": [101], "数据源": ["同花顺"]})
+    result = provider.get_history("industry", "BK0001", "测试行业", "20250201", "20250228")
+    assert result["data_source"].iloc[-1] == "同花顺"
 
 
 def test_board_name_normalization_matches_cross_source_names():
@@ -47,7 +59,7 @@ def test_industry_history_falls_back_to_sw_after_ths_fails(tmp_path):
     provider._eastmoney_history_available = False
     provider._ths_history = lambda *args: (_ for _ in ()).throw(LookupError("no ths"))
     provider._sw_history = lambda *args: pd.DataFrame({
-        "日期": pd.date_range("2025-01-01", periods=20, freq="B").strftime("%Y-%m-%d"),
+        "日期": pd.date_range("2025-02-03", periods=20, freq="B").strftime("%Y-%m-%d"),
         "开盘": range(100, 120), "最高": range(101, 121), "最低": range(99, 119),
         "收盘": range(100, 120), "成交量": range(1000, 1020), "成交额": range(2000, 2020),
         "数据源": ["申万研究"] * 20,

@@ -135,7 +135,14 @@ def load_mainline_stages(path: Path, cfg: dict[str, Any]) -> dict[str, str]:
             hit = hits.sort_values(score_col, ascending=False).iloc[0]
         else:
             hit = hits.iloc[0]
-        stages[sector] = str(hit["lifecycle"])
+        stage = str(hit["lifecycle"])
+        if stage == "Mainline":
+            coverage = pd.to_numeric(hit.get("mainline_coverage"), errors="coerce")
+            gate = hit.get("mainline_gate_passed", True)
+            if (pd.notna(coverage) and coverage < .65) or str(gate).lower() == "false":
+                print(f"[WARN] {sector} 主线评分覆盖或确认门槛不足，估值阶段按 Diffusion 处理")
+                stage = "Diffusion"
+        stages[sector] = stage
     return stages
 
 

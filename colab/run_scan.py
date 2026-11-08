@@ -14,6 +14,9 @@ LOOKBACK_CALENDAR_DAYS = 120
 REFRESH = False
 SCAN_ALL_SOURCE_BOARDS = True
 BAOSTOCK_MODE = "off"  # industry 较慢；all 还会合成概念，首次运行可能很慢
+LIMIT_UP_MIN_TODAY = 3
+LIMIT_UP_MIN_INCREASE = 3
+LIMIT_UP_MIN_RATIO = 2.0
 MARKET_HISTORY_FILE = Path("/content/market_daily.csv")  # 可选：独立全A成交额/基准
 SNAPSHOT_ARCHIVE_IN = None  # 如 Path('/content/snapshots-in.zip')
 SNAPSHOT_ARCHIVE_OUT = Path('/content/a-share-mainline-snapshots.zip')
@@ -73,6 +76,9 @@ def main() -> None:
         "--snapshot-cache-minutes", "5",
         "--snapshot-dir", str(snapshot_dir),
         "--baostock-mode", BAOSTOCK_MODE,
+        "--limit-up-min-today", str(LIMIT_UP_MIN_TODAY),
+        "--limit-up-min-increase", str(LIMIT_UP_MIN_INCREASE),
+        "--limit-up-min-ratio", str(LIMIT_UP_MIN_RATIO),
     ]
     if REFRESH:
         command.append("--refresh")
@@ -89,6 +95,9 @@ def main() -> None:
         if scan_result.stderr:
             print(scan_result.stderr[-12000:], file=sys.stderr)
         raise RuntimeError(f"扫描器退出码 {scan_result.returncode}；上方是原始日志和异常。")
+    rules = scan_result.stdout.split("=== 主要筛选条件 ===", 1)
+    if len(rules) == 2:
+        print("=== 主要筛选条件 ===" + rules[1].split("===", 1)[0])
     with zipfile.ZipFile(SNAPSHOT_ARCHIVE_OUT, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
         for path in snapshot_dir.glob('*.csv.gz'):
             archive.write(path, path.name)
@@ -139,6 +148,17 @@ def main() -> None:
     show_quant_rank("结构强势 Top 30", "结构强势.csv", "structure_score", [
         "kind", "code", "name", "structure_score", "structure_status", "structure_coverage", "structure_breadth", "limit_up_density",
     ])
+    display(Markdown("## 涨停数异常增加 Top 30"))
+    surge_path = output_dir / "涨停数异常增加.csv"
+    if surge_path.is_file():
+        surge = pd.read_csv(surge_path, dtype={"code": "string"})
+        if surge.empty:
+            display(Markdown("本次无板块通过门槛；请查看完整评分中的 `limit_up_status` 核对数据是否可用。"))
+        else:
+            display(surge.head(30))
+        print(f"涨停数核实成功：{scored['limit_up_status'].eq('已核实').sum()}/{len(scored)} 个板块")
+    else:
+        display(Markdown("未生成涨停数异常增加文件；请核对扫描器提交和运行日志。"))
     show_quant_rank("潜在漏检诊断 Top 30", "潜在漏检诊断.csv", "ignition_score", [
         "kind", "code", "name", "ignition_score", "lifecycle", "mainline_blockers", "人工核查提醒",
     ])

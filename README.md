@@ -17,6 +17,7 @@ mainline-scanner --market-history data/input/market_daily.csv
 mainline-scanner --snapshot-dir data/snapshots --backtest
 mainline-scanner --historical-replay  # 逐交易日重建基础量化信号
 mainline-scanner --structure-candidates 0  # 关闭在线成分股验证
+mainline-scanner --limit-up-min-today 3 --limit-up-min-increase 3 --limit-up-min-ratio 2
 ```
 
 默认扫描所有板块。历史日线依次尝试东方财富、同花顺、申万及可选的 BaoStock 合成回退。合成指数会标记来源，不可仅凭其价格信号升级为 `Mainline`。申万请求要求正常 TLS 证书验证。
@@ -24,6 +25,12 @@ mainline-scanner --structure-candidates 0  # 关闭在线成分股验证
 可选的 `--market-history` CSV 至少包含 `date,market_amount`；可加 `benchmark_close`。成交额应与板块日线同单位。如果提供 `stock_amount_sum`，默认要求它与全市场成交额误差不超过 5%。没有这个文件时，真实全市场成交占比保持缺失，量能以板块自身历史变化衡量。
 
 `--research-signals` 仅为旧命令兼容入口，会提示弃用，其文件内容完全不参与计算。`board_signals.csv` 不再是生成火种榜的前提。
+
+## 涨停数异常增加
+
+扫描会独立核对每个有效行业/概念板块：本次已完成交易日涨停股票数至少 3 只、比前一个交易日增加至少 3 只，且前日为 0 或今日数量至少为前日的 2 倍。三个门槛可用上面的命令行参数调整。输出 `涨停数异常增加.csv`，并在完整评分、Excel、Markdown 报告与 Colab 输出中显示计数、增量、倍数及筛选条件。命令行和 Colab 还会打印主要现有筛选条件。
+
+两日涨停池均按各自交易日查询；两个计数使用本次抓取的同一份成分股名单，避免因名单口径不同制造假增量。完整评分中的 `limit_up_membership_date` 标明名单抓取日期，因此前日计数并非历史成分股精确复盘。若涨停池或名单不可用，`limit_up_status` 记录原因，该板块不会入选。该筛选独立于主线生命周期评分；全板块成分股查询可能显著增加运行时间。
 
 ## 分数与确认条件
 

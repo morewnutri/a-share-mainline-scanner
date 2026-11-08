@@ -161,6 +161,7 @@ def write_outputs(
     omitted_csv = output_dir / "遗漏板块明细.csv"
     sideways_csv = output_dir / "横盘火种.csv"
     sideways_chart = output_dir / "横盘火种雷达.png"
+    surge_csv = output_dir / "涨停数异常增加.csv"
     market_audit_path = output_dir / "全A数据质量.csv"
     if market_audit is not None and not market_audit.empty:
         market_audit.to_csv(market_audit_path, index=False, encoding="utf-8-sig")
@@ -190,6 +191,15 @@ def write_outputs(
         radar_tables[title] = order[[c for c in ["kind", "code", "name", *columns] if c in order]]
         radar_tables[title].to_csv(output_dir / f"{title}.csv", index=False, encoding="utf-8-sig")
     scored.to_csv(full_csv, index=False, encoding="utf-8-sig")
+    if "limit_up_surge" in scored:
+        surge = scored[scored["limit_up_surge"]].sort_values(
+            ["limit_up_increase", "limit_up_today"], ascending=False,
+        )
+        surge[["kind", "code", "name", "as_of", "limit_up_previous_date",
+               "limit_up_today", "limit_up_previous", "limit_up_increase",
+               "limit_up_ratio", "limit_up_status", "limit_up_membership_date"]].to_csv(
+            surge_csv, index=False, encoding="utf-8-sig",
+        )
     sideways = scored[scored.get("sideways_seed_status", pd.Series("", index=scored.index)).isin(["横盘火种", "横盘观察"])].sort_values("sideways_seed_score", ascending=False)
     sideways.to_csv(sideways_csv, index=False, encoding="utf-8-sig")
     with pd.ExcelWriter(xlsx, engine="openpyxl") as writer:
@@ -200,6 +210,8 @@ def write_outputs(
                 writer, sheet_name="火种雷达", index=False,
             )
         sideways.to_excel(writer, sheet_name="横盘火种", index=False)
+        if "limit_up_surge" in scored:
+            surge.to_excel(writer, sheet_name="涨停数异常增加", index=False)
         for title, table in radar_tables.items():
             table.to_excel(writer, sheet_name=title, index=False)
         scored[scored["status"].isin(["潜在启动", "值得关注"])].sort_values("candidate_score", ascending=False).to_excel(writer, sheet_name="潜在主线", index=False)
@@ -236,6 +248,18 @@ def write_outputs(
     candidate = candidate[candidate.get("lifecycle", pd.Series(index=candidate.index, dtype=str)).isin(["Seed", "Ignition"])].sort_values("ignition_score", ascending=False)
     sideways_display = _deduplicate_for_display(scored, "sideways_seed_score")
     sideways_display = sideways_display[sideways_display["sideways_seed_status"].isin(["横盘火种", "横盘观察"])].sort_values("sideways_seed_score", ascending=False)
+    surge_text = ""
+    if "limit_up_surge" in scored:
+        from .limit_up_surge import surge_rule
+        surge_columns = ["kind", "code", "name", "limit_up_today", "limit_up_previous",
+                         "limit_up_increase", "limit_up_ratio"]
+        rule = surge_rule(scored.attrs.get("limit_up_min_today", 3),
+                          scored.attrs.get("limit_up_min_increase", 3),
+                          scored.attrs.get("limit_up_min_ratio", 2.0))
+        surge_text = ("## 涨停数异常增加\n\n筛选条件：" + rule + "\n\n"
+                      + (surge[surge_columns].head(30).to_markdown(index=False, floatfmt=".2f")
+                         if not surge.empty else "本次没有通过筛选的板块，或涨停池/成分股数据不可用。")
+                      + "\n\n成分股名单日期与核实状态见完整评分 CSV；名单可能与前一交易日实际成分不同。\n\n")
     radar_text = "\n\n".join(
         f"## {title}\n\n{table.head(20).to_markdown(index=False, floatfmt='.2f')}"
         for title, table in radar_tables.items()
@@ -277,6 +301,8 @@ def write_outputs(
 
 {_fmt_sideways_table(sideways_display, 20) if not sideways_display.empty else '当前没有满足绝对门槛的低位箱体板块。'}
 
+{surge_text}
+
 {radar_text}
 
 ## 人工核查提醒（均未纳入计算）
@@ -311,6 +337,8 @@ def write_outputs(
 <img src='{html.escape(dashboard.name)}'><img src='{html.escape(sideways_chart.name)}'><img src='{html.escape(trends.name)}'>{radar_html}<h2>完整评分（前100）</h2>{table_html}
 """, encoding="utf-8")
     paths = {"csv": full_csv, "sideways_csv": sideways_csv, "xlsx": xlsx, "dashboard": dashboard, "sideways_chart": sideways_chart, "trends": trends, "markdown": md, "html": html_path}
+    if "limit_up_surge" in scored:
+        paths["surge_csv"] = surge_csv
     paths.update({title: output_dir / f"{title}.csv" for title in radar_tables})
     if audit is not None:
         paths.update({"audit_xlsx": audit_xlsx, "omitted_csv": omitted_csv})

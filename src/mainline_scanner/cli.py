@@ -18,6 +18,7 @@ from .market_metrics import enrich_market_history, load_market
 from .quant_scores import add_quant_radar, add_switch_signals
 from .manual_checklist import attach_manual_checklist
 from .stock_structure import enrich_candidate_structure
+from .limit_up_surge import enrich_limit_up_surge, surge_rule
 from .snapshot_store import SnapshotStore
 from .trading_calendar import expected_close_session
 
@@ -49,6 +50,9 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--market-reconciliation-tolerance", type=float, default=.05, help="提供个股成交额总和时允许的最大对账误差")
     p.add_argument("--limit", type=int, default=0, help="仅调试：每类最多抓取N个板块，0为全部")
     p.add_argument("--structure-candidates", type=int, default=20, help="自动获取个股结构的每榜候选数；0为关闭")
+    p.add_argument("--limit-up-min-today", type=int, default=3, help="涨停突增：当日最少涨停股票数")
+    p.add_argument("--limit-up-min-increase", type=int, default=3, help="涨停突增：较前一交易日最少增加数")
+    p.add_argument("--limit-up-min-ratio", type=float, default=2.0, help="涨停突增：前日非零时的最小倍数")
     p.add_argument("--verbose", action="store_true")
     return p
 
@@ -106,6 +110,12 @@ def run(args: argparse.Namespace) -> dict[str, Path]:
     enriched = store.enrich(preliminary, captured_at)
     scored = add_switch_signals(add_quant_radar(score_boards(enriched)))
     scored = attach_manual_checklist(enrich_candidate_structure(scored, provider, args.structure_candidates, captured_at))
+    scored = enrich_limit_up_surge(scored, provider, captured_at,
+                                   args.limit_up_min_today, args.limit_up_min_increase,
+                                   args.limit_up_min_ratio, args.workers)
+    scored.attrs.update(limit_up_min_today=args.limit_up_min_today,
+                        limit_up_min_increase=args.limit_up_min_increase,
+                        limit_up_min_ratio=args.limit_up_min_ratio)
     scored["run_mode"] = "close" if market_as_of.date() == captured_at.date() else "historical_replay"
     if scored.empty:
         raise RuntimeError("没有获得足够的有效板块数据，请检查网络、日期或 AKShare 接口状态")
@@ -125,6 +135,16 @@ def run(args: argparse.Namespace) -> dict[str, Path]:
                                            args.output_dir / "historical_replay"))
     print("\n=== 数据完整性 ===")
     print(audit_summary.to_string(index=False))
+    print("\n=== 主要筛选条件 ===")
+    print("当前主线：lifecycle = Mainline；主线分 ≥ 80、覆盖率 ≥ 65%、5日趋势 > 0、10日收益 > 0，已知广度 ≥ 45%；排除合成指数，且同源可比板块 ≥ 3。")
+    print("潜在主线：lifecycle 为 Seed 或 Ignition；火种分分别 ≥ 60/72、5日收益 < 8%，且满足轨迹数据要求。")
+    print("横盘火种：至少 40 个交易日、20日箱体振幅 ≤ 15%、20日斜率绝对值 ≤ 0.35、60日区间位置 ≤ 55%、距60日高点 ≤ -8%；横盘观察/火种分分别 ≥ 60/70。")
+    print("涨停数异常增加：" + surge_rule(args.limit_up_min_today, args.limit_up_min_increase, args.limit_up_min_ratio))
+    print("退潮/切换：按相关量化分排序；切换需要不同交易日且模型版本一致的历史快照。")
+    surge = scored[scored["limit_up_surge"]].sort_values(["limit_up_increase", "limit_up_today"], ascending=False)
+    print("\n=== 涨停数异常增加的行业/概念 Top 30 ===")
+    print(surge[["kind", "code", "name", "limit_up_today", "limit_up_previous", "limit_up_increase", "limit_up_ratio"]].head(30).to_string(index=False))
+    print(f"核实成功 {scored['limit_up_status'].eq('已核实').sum()}/{len(scored)} 个板块；完整状态见 板块完整评分.csv。")
     show_cols = ["kind", "name", "lifecycle", "mainline_score", "ignition_score", "confirmation_score", "ret_5d", "ret_10d", "slope_5d", "acceleration"]
     print("\n=== 当前主线 Top 20 ===")
     current_mainline = scored[scored["lifecycle"].eq("Mainline")]

@@ -5,7 +5,6 @@ import logging
 import re
 import threading
 import time
-import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -14,7 +13,7 @@ from typing import Iterable
 
 import pandas as pd
 import requests
-from urllib3.exceptions import InsecureRequestWarning
+from .trading_calendar import expected_close_session
 from tenacity import retry, stop_after_attempt, wait_exponential
 from tqdm import tqdm
 
@@ -279,15 +278,10 @@ class EastmoneyAkshareProvider:
             headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://www.swsresearch.com/"}
             mapping: dict[str, str] = {}
             for level in ("一级行业", "二级行业"):
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore", InsecureRequestWarning)
-                    response = requests.get(
-                        url,
-                        params={"page": 1, "page_size": 1000, "indextype": level},
-                        headers=headers,
-                        timeout=30,
-                        verify=False,
-                    )
+                response = requests.get(
+                    url, params={"page": 1, "page_size": 1000, "indextype": level},
+                    headers=headers, timeout=30,
+                )
                 response.raise_for_status()
                 rows = ((response.json().get("data") or {}).get("results") or [])
                 for row in rows:
@@ -315,15 +309,12 @@ class EastmoneyAkshareProvider:
             if self._fresh(path):
                 result = self._read_cache(path)
             else:
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore", InsecureRequestWarning)
-                    response = requests.get(
-                        "https://www.swsresearch.com/institute-sw/api/index_publish/trend/",
-                        params={"swindexcode": code, "period": "DAY"},
-                        headers={"User-Agent": "Mozilla/5.0", "Referer": "https://www.swsresearch.com/"},
-                        timeout=60,
-                        verify=False,
-                    )
+                response = requests.get(
+                    "https://www.swsresearch.com/institute-sw/api/index_publish/trend/",
+                    params={"swindexcode": code, "period": "DAY"},
+                    headers={"User-Agent": "Mozilla/5.0", "Referer": "https://www.swsresearch.com/"},
+                    timeout=60,
+                )
                 response.raise_for_status()
                 result = pd.DataFrame(response.json().get("data") or []).rename(columns={
                     "bargaindate": "日期", "openindex": "开盘", "maxindex": "最高",
@@ -423,9 +414,50 @@ class EastmoneyAkshareProvider:
     def _history_path(self, kind: str, code: str, name: str) -> Path:
         return self.cache_dir / "histories" / kind / f"{code}_{_safe_name(name)}.csv"
 
+    def _history_cache_valid(self, path: Path, start: str, end: str) -> bool:
+        if not self._fresh(path):
+            return False
+        meta_path = path.with_suffix(".json")
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            raw = self._read_cache(path)
+            date_col = _find_col(raw.columns, "日期", "date")
+            dates = _parse_market_dates(raw[date_col]).dropna() if date_col else pd.Series(dtype="datetime64[ns]")
+            expected = expected_close_session(pd.Timestamp(end))
+            return (meta["requested_start"] <= start
+                    and meta["expected_trade_date"] == str(expected.date())
+                    and meta.get("adjustment") == "none"
+                    and meta.get("source") and not dates.empty
+                    and meta.get("last_actual_date") == str(dates.max().date())
+                    and dates.max().normalize() == expected)
+        except (OSError, KeyError, ValueError, TypeError):
+            return False
+
+    @staticmethod
+    def _raw_has_expected_session(raw: pd.DataFrame, end: str) -> bool:
+        if raw.empty:
+            return False
+        date_col = _find_col(raw.columns, "日期", "date")
+        if date_col is None:
+            return False
+        dates = _parse_market_dates(raw[date_col]).dropna()
+        expected = expected_close_session(pd.Timestamp(end))
+        return bool((dates <= expected).any() and dates[dates <= expected].max().normalize() == expected)
+
+    def _write_history_cache(self, raw: pd.DataFrame, path: Path, start: str, end: str) -> None:
+        self._write_cache(raw, path)
+        source = str(raw["数据源"].iloc[-1]) if "数据源" in raw else "东方财富"
+        date_col = _find_col(raw.columns, "日期", "date")
+        dates = _parse_market_dates(raw[date_col]).dropna() if date_col else pd.Series(dtype="datetime64[ns]")
+        meta = {"requested_start": start, "requested_end": end,
+                "expected_trade_date": str(expected_close_session(pd.Timestamp(end)).date()),
+                "last_actual_date": str(dates.max().date()) if not dates.empty else "",
+                "adjustment": "none", "source": source}
+        path.with_suffix(".json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+
     def get_history(self, kind: str, code: str, name: str, start: str, end: str) -> pd.DataFrame:
         path = self._history_path(kind, code, name)
-        if self._fresh(path):
+        if self._history_cache_valid(path, start, end):
             raw = self._read_cache(path)
         else:
             eastmoney_error: Exception | None = None
@@ -433,31 +465,43 @@ class EastmoneyAkshareProvider:
             if self._eastmoney_history_available is not False:
                 try:
                     raw = self._direct_history(code, start, end)
+                    if not self._raw_has_expected_session(raw, end):
+                        raise ValueError("东方财富缺少预期收盘交易日")
                 except Exception as exc:
                     eastmoney_error = exc
+                    raw = pd.DataFrame()
             if raw.empty:
                 try:
                     raw = self._ths_history(kind, name, start, end)
+                    if not self._raw_has_expected_session(raw, end):
+                        raise ValueError("同花顺缺少预期收盘交易日")
                 except Exception as ths_error:
+                    raw = pd.DataFrame()
                     sw_error: Exception | str = "仅行业板块适用"
                     if kind == "industry":
                         try:
                             raw = self._sw_history(name, start, end)
+                            if not self._raw_has_expected_session(raw, end):
+                                raise ValueError("申万缺少预期收盘交易日")
                         except Exception as exc:
                             sw_error = exc
+                            raw = pd.DataFrame()
                     baostock_error: Exception | str = "未启用"
                     if raw.empty and getattr(self, "baostock_mode", "off") != "off":
                         try:
                             raw = self._baostock_history(kind, name, start, end)
+                            if not self._raw_has_expected_session(raw, end):
+                                raise ValueError("BaoStock缺少预期收盘交易日")
                         except Exception as exc:
                             baostock_error = exc
+                            raw = pd.DataFrame()
                     if raw.empty:
                         raise RuntimeError(
                             f"东方财富失败: {eastmoney_error or '端点探测已判定不可用'}; "
                             f"同花顺失败: {ths_error}; 申万失败: {sw_error}; "
                             f"BaoStock失败: {baostock_error}"
                         ) from ths_error
-            self._write_cache(raw, path)
+            self._write_history_cache(raw, path, start, end)
         if raw.empty:
             return raw
         rename = {}
@@ -479,7 +523,21 @@ class EastmoneyAkshareProvider:
         for col in ["open", "close", "high", "low", "pct_change", "volume", "amount", "turnover"]:
             if col in out:
                 out[col] = pd.to_numeric(out[col], errors="coerce")
-        return out.dropna(subset=["date", "close"]).sort_values("date").reset_index(drop=True)
+        out = out[out["date"] <= expected_close_session(pd.Timestamp(end))]
+        out = out.dropna(subset=["date", "close"]).sort_values("date").reset_index(drop=True)
+        if out["date"].duplicated().any() or (out["close"] <= 0).any():
+            raise ValueError(f"{kind}/{name} 历史日线日期或价格异常")
+        if {"high", "low"}.issubset(out):
+            invalid = (out["high"] < out["low"]) | (out["close"] > out["high"]) | (out["close"] < out["low"])
+            if "open" in out:
+                invalid |= (out["open"] > out["high"]) | (out["open"] < out["low"])
+            if invalid.any():
+                raise ValueError(f"{kind}/{name} 历史OHLC异常")
+        if "amount" in out and (out["amount"] < 0).any():
+            raise ValueError(f"{kind}/{name} 成交额为负")
+        if out.empty or out["date"].max() != expected_close_session(pd.Timestamp(end)):
+            raise ValueError(f"{kind}/{name} 缺少预期收盘交易日 {expected_close_session(pd.Timestamp(end)).date()}")
+        return out
 
     def get_histories(self, boards: pd.DataFrame, start: str, end: str, max_workers: int = 8) -> FetchResult:
         histories: dict[tuple[str, str], pd.DataFrame] = {}
@@ -487,7 +545,7 @@ class EastmoneyAkshareProvider:
         rows = boards[["kind", "code", "name"]].to_dict("records")
         uncached = [
             r for r in rows
-            if not self._fresh(self._history_path(str(r["kind"]), str(r["code"]), str(r["name"])))
+            if not self._history_cache_valid(self._history_path(str(r["kind"]), str(r["code"]), str(r["name"])), start, end)
         ]
         if uncached and self._eastmoney_history_available is None:
             probe_errors = []
@@ -496,8 +554,10 @@ class EastmoneyAkshareProvider:
                     raw = self._direct_history(str(probe["code"]), start, end)
                     if raw.empty:
                         raise RuntimeError("端点返回空日线")
+                    if not self._raw_has_expected_session(raw, end):
+                        raise RuntimeError("端点缺少预期收盘交易日")
                     self._eastmoney_history_available = True
-                    self._write_cache(raw, self._history_path(str(probe["kind"]), str(probe["code"]), str(probe["name"])))
+                    self._write_history_cache(raw, self._history_path(str(probe["kind"]), str(probe["code"]), str(probe["name"])), start, end)
                     LOG.info("东方财富板块日线端点可用")
                     break
                 except Exception as exc:
@@ -553,8 +613,11 @@ class EastmoneyAkshareProvider:
                     pct_col = _find_col(raw.columns, "主力净流入-净占比")
                     if not all([name_col, amount_col, pct_col]):
                         raise ValueError(f"资金流字段异常: {list(raw.columns)}")
-                    x = raw[[name_col, amount_col, pct_col]].copy()
-                    x.columns = ["name", f"flow_{window}d_amount", f"flow_{window}d_pct"]
+                    code_col = _find_col(raw.columns, "板块代码", "f12")
+                    x = raw[[*([code_col] if code_col else []), name_col, amount_col, pct_col]].copy()
+                    x.columns = [*(["code"] if code_col else []), "name", f"flow_{window}d_amount", f"flow_{window}d_pct"]
+                    if code_col:
+                        x["code"] = x["code"].astype(str)
                     x["kind"] = kind
                     x[f"flow_{window}d_amount"] = pd.to_numeric(x[f"flow_{window}d_amount"], errors="coerce")
                     x[f"flow_{window}d_pct"] = pd.to_numeric(x[f"flow_{window}d_pct"], errors="coerce")
@@ -568,7 +631,9 @@ class EastmoneyAkshareProvider:
             return pd.DataFrame(columns=["kind", "name"])
         result = pieces[0]
         for piece in pieces[1:]:
-            result = result.merge(piece, on=["kind", "name"], how="outer")
+            keys = ["kind", "code"] if "code" in result and "code" in piece else ["kind", "name"]
+            result = result.merge(piece.drop(columns=["name"]) if "code" in keys else piece,
+                                  on=keys, how="outer")
         return result
 
     def _direct_fund_flow(self, kind: str, window: int) -> pd.DataFrame:
@@ -595,7 +660,7 @@ class EastmoneyAkshareProvider:
                 break
             page += 1
         raw = pd.DataFrame(rows).rename(columns={
-            "f14": "名称", amount_field: f"{window}日主力净流入-净额",
+            "f12": "板块代码", "f14": "名称", amount_field: f"{window}日主力净流入-净额",
             pct_field: f"{window}日主力净流入-净占比",
         })
         return raw

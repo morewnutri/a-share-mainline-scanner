@@ -39,8 +39,9 @@ def build_completeness_audit(
     for window in (1, 5, 10):
         col = f"flow_{window}d_pct"
         if not flows.empty and col in flows:
-            matched = flows.loc[flows[col].notna(), ["kind", "name"]]
-            flow_sets[window] = {(str(r.kind), str(r.name)) for r in matched.itertuples(index=False)}
+            keys = ["kind", "code"] if "code" in flows else ["kind", "name"]
+            matched = flows.loc[flows[col].notna(), keys]
+            flow_sets[window] = {(str(r[0]), str(r[1])) for r in matched.itertuples(index=False, name=None)}
         else:
             flow_sets[window] = set()
 
@@ -85,11 +86,15 @@ def build_completeness_audit(
             "synthetic_constituents": np.nan, "synthetic_coverage": np.nan,
             "stale_trading_days": np.nan, "missing_trading_days_count": 0,
             "missing_trading_dates": "", "duplicate_dates": 0,
-            "invalid_close_rows": 0, "invalid_ohlc_rows": 0,
-            "flow_1d_matched": (str(row.kind), str(row.name)) in flow_sets[1],
-            "flow_5d_matched": (str(row.kind), str(row.name)) in flow_sets[5],
-            "flow_10d_matched": (str(row.kind), str(row.name)) in flow_sets[10],
+            "invalid_close_rows": 0, "invalid_ohlc_rows": 0, "invalid_amount_rows": 0,
+            "flow_1d_matched": (str(row.kind), str(row.code if "code" in flows else row.name)) in flow_sets[1],
+            "flow_5d_matched": (str(row.kind), str(row.code if "code" in flows else row.name)) in flow_sets[5],
+            "flow_10d_matched": (str(row.kind), str(row.code if "code" in flows else row.name)) in flow_sets[10],
             "in_final_scoring": key in scored_keys,
+            "indicator_coverage": pd.to_numeric(scored_row.get("mainline_coverage"), errors="coerce"),
+            "ignition_coverage": pd.to_numeric(scored_row.get("ignition_coverage"), errors="coerce"),
+            "comparison_peer_count": pd.to_numeric(scored_row.get("comparison_peer_count"), errors="coerce"),
+            "snapshot_alignment": scored_row.get("snapshot_alignment", "未提供"),
         }
         for window in (1, 5, 10):
             value = pd.to_numeric(scored_row.get(f"flow_{window}d_pct"), errors="coerce")
@@ -114,12 +119,16 @@ def build_completeness_audit(
             record["duplicate_dates"] = int(dates.duplicated().sum())
             close = pd.to_numeric(h.get("close"), errors="coerce")
             record["invalid_close_rows"] = int((close.isna() | (close <= 0)).sum())
+            if "amount" in h:
+                record["invalid_amount_rows"] = int((pd.to_numeric(h["amount"], errors="coerce") < 0).sum())
             if {"high", "low"}.issubset(h.columns):
                 high = pd.to_numeric(h["high"], errors="coerce")
                 low = pd.to_numeric(h["low"], errors="coerce")
-                record["invalid_ohlc_rows"] = int(
-                    ((high < low) | (close > high) | (close < low)).fillna(False).sum()
-                )
+                invalid = (high < low) | (close > high) | (close < low)
+                if "open" in h:
+                    opening = pd.to_numeric(h["open"], errors="coerce")
+                    invalid |= (opening > high) | (opening < low)
+                record["invalid_ohlc_rows"] = int(invalid.fillna(False).sum())
             ref = reference_calendar.get(str(row.kind), pd.DatetimeIndex([]))
             if len(ref) and not dates.empty:
                 eligible = ref[ref >= dates.min()]
@@ -132,7 +141,7 @@ def build_completeness_audit(
             status = "主动过滤"
         elif history is None or history.empty:
             status = "日线不足" if "不足" in error else "日线抓取失败"
-        elif record["duplicate_dates"] or record["invalid_close_rows"] or record["invalid_ohlc_rows"]:
+        elif record["duplicate_dates"] or record["invalid_close_rows"] or record["invalid_ohlc_rows"] or record["invalid_amount_rows"]:
             status = "行情质量异常"
         elif record["stale_trading_days"] and record["stale_trading_days"] > 0:
             status = "行情未到最新日"
@@ -140,11 +149,19 @@ def build_completeness_audit(
             status = "行情日期缺口"
         elif key not in scored_keys:
             status = "未进入评分"
+        elif "不一致" in str(record["snapshot_alignment"]):
+            status = "实时字段不一致"
+        elif pd.notna(record["indicator_coverage"]) and record["indicator_coverage"] < .8:
+            status = "指标覆盖不足"
         elif not all(record[f"flow_{w}d_available"] for w in (1, 5, 10)):
             status = "资金流部分缺失"
+        elif any(record[f"flow_{w}d_source"] == "量价代理CMF" for w in (1, 5, 10)):
+            status = "代理数据"
         else:
             status = "完整"
         record["audit_status"] = status
+        record["history_quality"] = "有效" if record["history_rows"] > 0 and status not in {"行情质量异常", "行情未到最新日", "行情日期缺口"} else "异常或缺失"
+        record["data_trust"] = "低" if status in {"行情质量异常", "行情未到最新日", "行情日期缺口", "实时字段不一致"} else "代理" if status == "代理数据" else "待核" if status == "指标覆盖不足" else "已核"
         record["is_omitted"] = key not in scored_keys
         records.append(record)
 
@@ -165,6 +182,9 @@ def build_completeness_audit(
             "final_scored": int(target["in_final_scoring"].sum()),
             "omitted_from_scoring": int(target["is_omitted"].sum()),
             "target_coverage_pct": round(float(target["in_final_scoring"].mean() * 100), 2) if len(target) else np.nan,
+            "history_valid_pct": round(float(target["history_quality"].eq("有效").mean() * 100), 2) if len(target) else np.nan,
+            "indicator_coverage_mean": round(float(target["indicator_coverage"].mean()), 3) if len(target) else np.nan,
+            "proxy_data_pct": round(float(target["data_trust"].eq("代理").mean() * 100), 2) if len(target) else np.nan,
             "flow_1d_match_pct": round(float(target["flow_1d_matched"].mean() * 100), 2) if len(target) else np.nan,
             "flow_5d_match_pct": round(float(target["flow_5d_matched"].mean() * 100), 2) if len(target) else np.nan,
             "flow_10d_match_pct": round(float(target["flow_10d_matched"].mean() * 100), 2) if len(target) else np.nan,
@@ -172,7 +192,7 @@ def build_completeness_audit(
             "flow_5d_available_pct": round(float(target["flow_5d_available"].mean() * 100), 2) if len(target) else np.nan,
             "flow_10d_available_pct": round(float(target["flow_10d_available"].mean() * 100), 2) if len(target) else np.nan,
             "quality_warning_count": int(target["audit_status"].isin([
-                "行情质量异常", "行情未到最新日", "行情日期缺口", "资金流部分缺失",
+                "行情质量异常", "行情未到最新日", "行情日期缺口", "实时字段不一致", "资金流部分缺失", "指标覆盖不足", "代理数据",
             ]).sum()),
         })
     return audit, pd.DataFrame(summary_rows)

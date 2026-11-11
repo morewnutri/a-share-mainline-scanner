@@ -45,6 +45,13 @@ def test_load_mainline_stages_maps_board_alias(tmp_path):
     assert load_mainline_stages(path, cfg)["家电"] == "Ignition"
 
 
+def test_low_coverage_mainline_is_not_used_as_confirmed_valuation_stage(tmp_path):
+    path = tmp_path / "板块完整评分.csv"
+    path.write_text("name,lifecycle,mainline_score,mainline_coverage,mainline_gate_passed\n家用电器,Mainline,86,0.4,False\n", encoding="utf-8-sig")
+    cfg = {"sectors": {"家电": {"boards": [{"aliases": ["家用电器"]}]}}}
+    assert load_mainline_stages(path, cfg)["家电"] == "Diffusion"
+
+
 def test_default_mainline_path_prefers_colab_scan_output(tmp_path):
     scan = tmp_path / "板块完整评分.csv"
     scan.write_text("name,lifecycle\n家用电器,Mainline\n", encoding="utf-8")
